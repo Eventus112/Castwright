@@ -68,7 +68,8 @@ export async function migrateLegacyUserSettings(opts: {
 function migrateLegacyEagerLoadFields(raw: unknown): unknown {
   if (!raw || typeof raw !== 'object') return raw;
   const obj = raw as Record<string, unknown>;
-  const hasLegacy = typeof obj.eagerLoadKokoro === 'boolean' || typeof obj.eagerLoadQwen === 'boolean';
+  const hasLegacy =
+    typeof obj.eagerLoadKokoro === 'boolean' || typeof obj.eagerLoadQwen === 'boolean';
   if (!hasLegacy) return raw;
 
   const overrides = { ...(obj.configOverrides as Record<string, unknown> | undefined) };
@@ -81,10 +82,12 @@ function migrateLegacyEagerLoadFields(raw: unknown): unknown {
     overrides['tts.preload.kokoro'] = isQwenDefault ? false : eagerLoadKokoro;
   }
   if (!('tts.preload.qwen' in overrides)) {
-    overrides['tts.preload.qwen'] = isQwenDefault && modelKey === 'qwen3-tts-0.6b' ? eagerLoadQwen : false;
+    overrides['tts.preload.qwen'] =
+      isQwenDefault && modelKey === 'qwen3-tts-0.6b' ? eagerLoadQwen : false;
   }
   if (!('tts.preload.qwenBase17' in overrides)) {
-    overrides['tts.preload.qwenBase17'] = isQwenDefault && modelKey === 'qwen3-tts-1.7b' ? eagerLoadQwen : false;
+    overrides['tts.preload.qwenBase17'] =
+      isQwenDefault && modelKey === 'qwen3-tts-1.7b' ? eagerLoadQwen : false;
   }
 
   const next: Record<string, unknown> = { ...obj, configOverrides: overrides };
@@ -95,6 +98,7 @@ function migrateLegacyEagerLoadFields(raw: unknown): unknown {
 
 export const TTS_ENGINE_VALUES = ['local', 'gemini'] as const;
 export const ANALYSIS_ENGINE_VALUES = ['local', 'gemini'] as const;
+export const ANALYZER_PROVIDER_VALUES = ['ollama', 'openai', 'gemini'] as const;
 export const TTS_MODEL_KEY_VALUES = [
   'kokoro-v1',
   'qwen3-tts-0.6b',
@@ -138,6 +142,11 @@ export const userSettingsSchema = z.object({
      falls back to all-DEFAULT (also local) — see getResolvedAnalysisEngine.
      The ANALYZER env var no longer selects the engine. */
   analysisEngine: z.enum(ANALYSIS_ENGINE_VALUES).default('local'),
+  /* User-facing analyzer connection. Kept separate from the legacy
+     local|gemini analysisEngine so existing workspaces and per-book engine
+     metadata remain compatible while OpenAI-compatible endpoints become a
+     first-class editable provider. */
+  analyzerProvider: z.enum(ANALYZER_PROVIDER_VALUES).default('ollama'),
   /* Part 1 — opt-out cloud fallback gate. When engine=local and a Gemini key
      is present, the analyzer wraps Ollama in a FallbackAnalyzer that fails over
      to Gemini iff the local daemon is unreachable. Default true (non-breaking:
@@ -148,6 +157,8 @@ export const userSettingsSchema = z.object({
   /* Base URL of the local Ollama daemon. Falls through to OLLAMA_URL env
      and then http://localhost:11434 in getResolvedOllamaUrl. */
   ollamaUrl: z.string().min(1).max(2000),
+  openaiBaseUrl: z.string().max(2000).default('http://localhost:8000/v1'),
+  openaiModel: z.string().min(1).max(240).default('castwright'),
   workspaceDirOverride: z.string().max(2000).nullable(),
   /* Optional folder the export pipeline copies finished audiobooks into,
      e.g. a OneDrive / Syncthing watch path so the file lands on the user's
@@ -216,6 +227,9 @@ export const userSettingsSchema = z.object({
      `writeGeminiApiKey()` invoked from the dedicated
      PUT /api/user/settings/gemini-key endpoint. */
   geminiApiKey: z.string().nullable().optional(),
+  /* Saved through a dedicated endpoint and redacted from every GET, exactly
+     like geminiApiKey. OPENAI_API_KEY remains the ops-level override. */
+  openaiApiKey: z.string().nullable().optional(),
   /* srv-2 — per-book state.json auto-backup. When enabled, a background sweep
      snapshots each book's state.json on the chosen cadence and keeps the
      newest `backupRetention`. Optional with ON/daily/14 defaults so legacy
@@ -285,11 +299,14 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
      Defaults step routes to the free Gemini API instead. Flip in lockstep
      with src/lib/account-defaults.ts FRONTEND_ACCOUNT_DEFAULTS. */
   analysisEngine: 'local',
+  analyzerProvider: 'ollama',
   /* Part 1 — cloud fallback ON by default (opt-out). Existing installs keep
      today's Ollama→Gemini fallback; strict-local users turn it off in analyzer
      settings. Flip in lockstep with src/lib/account-defaults.ts. */
   allowCloudFallback: true,
   ollamaUrl: 'http://localhost:11434',
+  openaiBaseUrl: 'http://localhost:8000/v1',
+  openaiModel: 'castwright',
   workspaceDirOverride: null,
   exportSyncFolder: null,
   minorCastMinLines: 3,
@@ -326,6 +343,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   /* Plan 49 — null = no UI-saved key. Resolver falls through to env
      (process.env.GEMINI_API_KEY) and then null. */
   geminiApiKey: null,
+  openaiApiKey: null,
   /* config-override store — empty by default; populated by writeConfigOverride. */
   configOverrides: {},
   /* Per-model analyzer keep-alive — empty by default; every model falls
@@ -363,7 +381,10 @@ export async function readUserSettings(): Promise<UserSettings> {
       console.warn('[user-settings] eager-load migration write failed (non-fatal):', err);
     });
   }
-  const parsed = userSettingsSchema.safeParse({ ...DEFAULT_USER_SETTINGS, ...(migrated as object) });
+  const parsed = userSettingsSchema.safeParse({
+    ...DEFAULT_USER_SETTINGS,
+    ...(migrated as object),
+  });
   cached = parsed.success ? parsed.data : { ...DEFAULT_USER_SETTINGS };
   return cached;
 }
@@ -431,6 +452,7 @@ const FORBIDDEN_KEYS = new Set([
   'workspaceRoot',
   'workspaceSource',
   'geminiApiKey',
+  'openaiApiKey',
   'apiKey',
   'gemini_api_key',
   'GEMINI_API_KEY',
@@ -674,6 +696,29 @@ export function getResolvedAnalysisEngine(): 'local' | 'gemini' {
   return getCachedUserSettings().analysisEngine === 'gemini' ? 'gemini' : 'local';
 }
 
+export function getResolvedAnalyzerProvider(): 'ollama' | 'openai' | 'gemini' {
+  const configured = getCachedUserSettings().analyzerProvider;
+  if (configured === 'openai' || configured === 'gemini') return configured;
+  return getResolvedAnalysisEngine() === 'gemini' ? 'gemini' : 'ollama';
+}
+
+export function getResolvedOpenAIBaseUrl(): string {
+  return (
+    process.env.OPENAI_BASE_URL?.trim() ||
+    getCachedUserSettings().openaiBaseUrl.trim() ||
+    DEFAULT_USER_SETTINGS.openaiBaseUrl
+  );
+}
+
+export function getResolvedOpenAIModel(): string {
+  return process.env.OPENAI_MODEL?.trim() || getCachedUserSettings().openaiModel.trim();
+}
+
+export function getResolvedOpenAIApiKey(): string | null {
+  const value = process.env.OPENAI_API_KEY?.trim() || getCachedUserSettings().openaiApiKey?.trim();
+  return value || null;
+}
+
 /** Cloud-fallback gate (Part 1). Reads the saved user setting, defaulting
     TRUE (opt-out: existing installs keep today's Ollama→Gemini fallback).
     `ANALYZER_ALLOW_CLOUD_FALLBACK=0` is a legacy PRE-CACHE under-ride only —
@@ -703,6 +748,19 @@ export async function writeGeminiApiKey(key: string | null): Promise<UserSetting
   const next = writeChain.then(async () => {
     const current = await readUserSettings();
     const merged: UserSettings = { ...current, geminiApiKey: normalised };
+    await writeJsonAtomic(USER_SETTINGS_PATH, merged);
+    cached = merged;
+    return merged;
+  });
+  writeChain = next.catch(() => undefined);
+  return next;
+}
+
+export async function writeOpenAIApiKey(key: string | null): Promise<UserSettings> {
+  const normalised = typeof key === 'string' && key.trim().length > 0 ? key.trim() : null;
+  const next = writeChain.then(async () => {
+    const current = await readUserSettings();
+    const merged: UserSettings = { ...current, openaiApiKey: normalised };
     await writeJsonAtomic(USER_SETTINGS_PATH, merged);
     cached = merged;
     return merged;
@@ -797,7 +855,10 @@ export function readConfigOverrides(): Record<string, number | boolean | string>
 }
 
 /** Upserts a single key→value pair into the persisted configOverrides map. */
-export async function writeConfigOverride(key: string, value: number | boolean | string): Promise<void> {
+export async function writeConfigOverride(
+  key: string,
+  value: number | boolean | string,
+): Promise<void> {
   const current = await readUserSettings();
   const next = { ...(current.configOverrides ?? {}), [key]: value };
   await writeUserSettings({ configOverrides: next });

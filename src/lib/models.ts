@@ -13,7 +13,7 @@ export interface ModelOption {
   id: string;
   label: string;
   hint?: string;
-  engine: 'local' | 'gemini';
+  engine: 'local' | 'gemini' | 'openai';
 }
 
 export const MODEL_OPTIONS: ModelOption[] = [
@@ -175,12 +175,19 @@ export function buildLocalModelOptions(
     stay in sync. Local Ollama is the default analyzer engine now; the Gemini
     group still renders first as the curated static catalog (the pre-selected
     model — a local id — is driven by the saved default, not group order). */
-export function buildModelOptionGroups(localOptions: ModelOption[]): Array<{
-  engine: 'local' | 'gemini';
+export function buildModelOptionGroups(
+  localOptions: ModelOption[],
+  openAIModels: readonly string[] = [],
+): Array<{
+  engine: 'local' | 'gemini' | 'openai';
   label: string;
   models: ModelOption[];
 }> {
-  return [
+  const groups: Array<{
+    engine: 'local' | 'gemini' | 'openai';
+    label: string;
+    models: ModelOption[];
+  }> = [
     {
       engine: 'gemini',
       label: 'Gemini API (cloud)',
@@ -188,6 +195,18 @@ export function buildModelOptionGroups(localOptions: ModelOption[]): Array<{
     },
     { engine: 'local', label: 'Local Ollama (default, on-device)', models: localOptions },
   ];
+  if (openAIModels.length > 0) {
+    groups.unshift({
+      engine: 'openai',
+      label: 'OpenAI-compatible endpoint',
+      models: Array.from(new Set(openAIModels)).map((id) => ({
+        id,
+        label: id,
+        engine: 'openai' as const,
+      })),
+    });
+  }
+  return groups;
 }
 
 /** Back-compat static export: groups built from the CURATED local entries only

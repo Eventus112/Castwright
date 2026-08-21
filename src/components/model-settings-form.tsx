@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { PrimaryButton, Checkbox } from './primitives';
-import { FieldRow, GeminiKeyField, analyzerModelLabel } from './account-forms';
+import { FieldRow, GeminiKeyField, OpenAIKeyField, analyzerModelLabel } from './account-forms';
 import {
   SettingsAccordion,
   SettingsSection,
@@ -22,6 +22,7 @@ import { useAppDispatch, useAppSelector } from '../store';
 import {
   saveAccountSettings,
   saveGeminiApiKey,
+  saveOpenAIApiKey,
   fetchAnalyzerModels,
 } from '../store/account-slice';
 import { api, type BlockerDiagnosis } from '../lib/api';
@@ -97,6 +98,15 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
      falls back to the curated catalog. */
   const analyzerModelGroups = buildModelOptionGroups(
     buildLocalModelOptions(account.localAnalyzerModels),
+    Array.from(
+      new Set(
+        [
+          ...(account.openaiAnalyzerModels ?? []),
+          account.openaiModel,
+          account.resolvedAnalyzerProvider === 'openai' ? account.resolvedAnalyzerModel : undefined,
+        ].filter((id): id is string => Boolean(id)),
+      ),
+    ),
   );
   useEffect(() => {
     void dispatch(fetchAnalyzerModels());
@@ -110,10 +120,17 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
   const [defaultTtsModelKey, setDefaultTtsModelKey] = useState<TtsModelKey>(effectiveTtsModelKey);
   const [sidecarUrl, setSidecarUrl] = useState(account.sidecarUrl);
   const [analysisEngine, setAnalysisEngine] = useState<'local' | 'gemini'>(account.analysisEngine);
+  const [analyzerProvider, setAnalyzerProvider] = useState<'ollama' | 'openai' | 'gemini'>(
+    account.analyzerProvider ?? (account.analysisEngine === 'gemini' ? 'gemini' : 'ollama'),
+  );
   const [allowCloudFallback, setAllowCloudFallback] = useState<boolean>(
     account.allowCloudFallback ?? true,
   );
   const [ollamaUrl, setOllamaUrl] = useState(account.ollamaUrl);
+  const [openaiBaseUrl, setOpenaiBaseUrl] = useState(account.openaiBaseUrl ?? '');
+  const [openaiModel, setOpenaiModel] = useState(
+    account.openaiModel || account.resolvedAnalyzerModel || '',
+  );
   const [analyzerPhase0Model, setAnalyzerPhase0Model] = useState<string | null>(
     account.analyzerPhase0Model ?? null,
   );
@@ -140,8 +157,13 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
     setDefaultTtsModelKey(account.resolvedTtsModelKey ?? account.defaultTtsModelKey);
     setSidecarUrl(account.sidecarUrl);
     setAnalysisEngine(account.analysisEngine);
+    setAnalyzerProvider(
+      account.analyzerProvider ?? (account.analysisEngine === 'gemini' ? 'gemini' : 'ollama'),
+    );
     setAllowCloudFallback(account.allowCloudFallback ?? true);
     setOllamaUrl(account.ollamaUrl);
+    setOpenaiBaseUrl(account.openaiBaseUrl ?? '');
+    setOpenaiModel(account.openaiModel || account.resolvedAnalyzerModel || '');
     setAnalyzerPhase0Model(account.analyzerPhase0Model ?? null);
     setAnalyzerPhase1Model(account.analyzerPhase1Model ?? null);
     setAnalyzerPhase1MinLagChapters(account.analyzerPhase1MinLagChapters ?? null);
@@ -156,8 +178,12 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
     account.resolvedTtsModelKey,
     account.sidecarUrl,
     account.analysisEngine,
+    account.analyzerProvider,
     account.allowCloudFallback,
     account.ollamaUrl,
+    account.openaiBaseUrl,
+    account.openaiModel,
+    account.resolvedAnalyzerModel,
     account.analyzerPhase0Model,
     account.analyzerPhase1Model,
     account.analyzerPhase1MinLagChapters,
@@ -182,6 +208,8 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
      host (prevents pointing the server's outbound fetches at an arbitrary
      remote). Empty is allowed (falls back to the server default). */
   const sidecarUrlInvalid = sidecarUrl.trim() !== '' && !isPrivateHostUrl(sidecarUrl);
+  const analyzerConfigInvalid =
+    analyzerProvider === 'openai' && (!openaiBaseUrl.trim() || !openaiModel.trim());
 
   const dirty = useMemo(() => {
     return (
@@ -190,8 +218,12 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
       defaultTtsModelKey !== effectiveTtsModelKey ||
       sidecarUrl !== account.sidecarUrl ||
       analysisEngine !== account.analysisEngine ||
+      analyzerProvider !==
+        (account.analyzerProvider ?? (account.analysisEngine === 'gemini' ? 'gemini' : 'ollama')) ||
       allowCloudFallback !== (account.allowCloudFallback ?? true) ||
       ollamaUrl !== account.ollamaUrl ||
+      openaiBaseUrl !== (account.openaiBaseUrl ?? '') ||
+      openaiModel !== (account.openaiModel ?? '') ||
       analyzerPhase0Model !== (account.analyzerPhase0Model ?? null) ||
       analyzerPhase1Model !== (account.analyzerPhase1Model ?? null) ||
       analyzerPhase1MinLagChapters !== (account.analyzerPhase1MinLagChapters ?? null) ||
@@ -207,8 +239,11 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
     effectiveTtsModelKey,
     sidecarUrl,
     analysisEngine,
+    analyzerProvider,
     allowCloudFallback,
     ollamaUrl,
+    openaiBaseUrl,
+    openaiModel,
     analyzerPhase0Model,
     analyzerPhase1Model,
     analyzerPhase1MinLagChapters,
@@ -220,9 +255,9 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
   const saving = account.status === 'saving';
 
   const onSave = async () => {
-    if (sidecarUrlInvalid) return;
+    if (sidecarUrlInvalid || analyzerConfigInvalid) return;
     const patch: UserSettingsPatch = {
-      defaultAnalysisModel,
+      defaultAnalysisModel: analyzerProvider === 'openai' ? openaiModel : defaultAnalysisModel,
       defaultTtsEngine,
       defaultTtsModelKey,
       /* Pin the choice only when it differs from the resolved default — saving
@@ -232,8 +267,11 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
         defaultTtsModelKey !== effectiveTtsModelKey ? true : account.defaultTtsModelKeyExplicit,
       sidecarUrl,
       analysisEngine,
+      analyzerProvider,
       allowCloudFallback,
       ollamaUrl,
+      openaiBaseUrl,
+      openaiModel,
       analyzerPhase0Model,
       analyzerPhase1Model,
       analyzerPhase1MinLagChapters,
@@ -485,49 +523,118 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
           )}
         </FieldRow>
         <FieldRow
-          label="Analyzer engine"
+          label="LLM provider"
           sublabel={
-            'Default — Local routes analysis through the Ollama daemon on this machine, so nothing leaves the box (with Gemini as an opt-out fallback only when the daemon is unreachable, if a GEMINI_API_KEY is configured and Cloud fallback below is on). Gemini API sends every chapter straight to Google using the GEMINI_API_KEY in server/.env. Pick Gemini only if you want analysis to run in the cloud.'
+            'Choose where Castwright sends book-analysis requests. Settings take effect on the next request; no container restart is required.'
           }
         >
           <select
-            value={analysisEngine}
-            onChange={(e) => setAnalysisEngine(e.target.value as 'local' | 'gemini')}
+            value={analyzerProvider}
+            onChange={(e) => {
+              const provider = e.target.value as 'ollama' | 'openai' | 'gemini';
+              setAnalyzerProvider(provider);
+              setAnalysisEngine(provider === 'gemini' ? 'gemini' : 'local');
+              if (provider === 'openai') setDefaultAnalysisModel(openaiModel);
+            }}
+            data-testid="account-analyzer-provider"
             className="w-full px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
           >
-            <option value="local">Local Ollama (default — on-device, with Gemini fallback)</option>
+            <option value="ollama">Ollama</option>
+            <option value="openai">OpenAI-compatible endpoint</option>
             <option value="gemini">Gemini API (direct)</option>
           </select>
         </FieldRow>
-        <FieldRow
-          label="Cloud fallback"
-          sublabel="If the local analyzer is unavailable, fall back to Gemini for that run (requires a GEMINI_API_KEY). On by default. Turn off to keep analysis strictly local — the analyzer will never fall back to the cloud, even during a local outage. Only applies when the engine is Local."
-        >
-          <Checkbox
-            checked={allowCloudFallback}
-            onChange={setAllowCloudFallback}
-            data-testid="account-allow-cloud-fallback"
-            label={
-              allowCloudFallback
-                ? 'On — a local outage falls back to Gemini (announced, never silent).'
-                : 'Off — strictly local; a local outage fails the run instead of using the cloud.'
-            }
-          />
-        </FieldRow>
-        <FieldRow
-          label="Ollama URL"
-          sublabel={
-            'Local Ollama daemon endpoint. Default: http://localhost:11434. The Ollama model tag is whatever you pick above under "Analysis model" — pull it once with `ollama pull <tag>` before first run.'
-          }
-        >
-          <input
-            type="text"
-            value={ollamaUrl}
-            onChange={(e) => setOllamaUrl(e.target.value)}
-            placeholder="http://localhost:11434"
-            className="w-full px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
-          />
-        </FieldRow>
+        {analyzerProvider === 'ollama' && (
+          <>
+            <FieldRow
+              label="Ollama URL"
+              sublabel="Ollama API root. In Docker, use host.docker.internal instead of localhost when Ollama runs on the host."
+            >
+              <input
+                type="text"
+                value={ollamaUrl}
+                onChange={(e) => setOllamaUrl(e.target.value)}
+                placeholder="http://host.docker.internal:11434"
+                data-testid="account-ollama-url"
+                className="w-full px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
+              />
+            </FieldRow>
+            <FieldRow
+              label="Cloud fallback"
+              sublabel="Fall back to Gemini only if Ollama is unreachable. Turn this off for strictly local analysis."
+            >
+              <Checkbox
+                checked={allowCloudFallback}
+                onChange={setAllowCloudFallback}
+                data-testid="account-allow-cloud-fallback"
+                label={
+                  allowCloudFallback ? 'On — Gemini fallback is allowed.' : 'Off — Ollama only.'
+                }
+              />
+            </FieldRow>
+          </>
+        )}
+        {analyzerProvider === 'openai' && (
+          <>
+            <FieldRow
+              label="OpenAI-compatible endpoint"
+              sublabel="API root or full Chat Completions URL. Examples: http://host.docker.internal:5001/v1, http://server:8000/v1."
+            >
+              <input
+                type="text"
+                value={openaiBaseUrl}
+                onChange={(e) => setOpenaiBaseUrl(e.target.value)}
+                placeholder="http://host.docker.internal:5001/v1"
+                data-testid="account-openai-base-url"
+                className="w-full px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
+              />
+            </FieldRow>
+            <FieldRow
+              label="OpenAI-compatible model"
+              sublabel="Loaded from GET /v1/models after the connection settings are saved. You can also enter an exact model id manually."
+            >
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  list="openai-analyzer-models"
+                  value={openaiModel}
+                  onChange={(e) => {
+                    setOpenaiModel(e.target.value);
+                    setDefaultAnalysisModel(e.target.value);
+                  }}
+                  placeholder="served-model-name"
+                  data-testid="account-openai-model"
+                  className="min-w-0 flex-1 px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
+                />
+                <PrimaryButton
+                  variant="ghost"
+                  icon={false}
+                  onClick={() => void dispatch(fetchAnalyzerModels())}
+                >
+                  Refresh models
+                </PrimaryButton>
+              </div>
+              <datalist id="openai-analyzer-models">
+                {(account.openaiAnalyzerModels ?? []).map((id) => (
+                  <option key={id} value={id} />
+                ))}
+              </datalist>
+              {(account.openaiAnalyzerModels?.length ?? 0) > 0 && (
+                <p className="mt-2 text-xs text-emerald-700">
+                  Found {account.openaiAnalyzerModels?.length ?? 0} model
+                  {account.openaiAnalyzerModels?.length === 1 ? '' : 's'}.
+                </p>
+              )}
+              {(!openaiBaseUrl.trim() || !openaiModel.trim()) && (
+                <p className="mt-2 text-xs text-rose-700">Endpoint and model are required.</p>
+              )}
+            </FieldRow>
+            <OpenAIKeyField
+              status={account.openaiApiKeyStatus ?? 'unset'}
+              onSave={(key) => dispatch(saveOpenAIApiKey(key))}
+            />
+          </>
+        )}
         <GeminiKeyField
           status={account.apiKeyStatus}
           onSave={(key) => dispatch(saveGeminiApiKey(key))}
@@ -540,7 +647,7 @@ export function ModelSettingsForm({ embedded = false }: { embedded?: boolean } =
 
       <div className="flex items-center gap-4 px-6">
         <PrimaryButton
-          variant={dirty && !sidecarUrlInvalid ? 'dark' : 'ghost'}
+          variant={dirty && !sidecarUrlInvalid && !analyzerConfigInvalid ? 'dark' : 'ghost'}
           onClick={onSave}
           icon={false}
         >
@@ -572,7 +679,11 @@ function AnalyzerReadinessBadge({ diagnosis }: { diagnosis: BlockerDiagnosis }) 
     diagnosis.status === 'pass'
       ? { dot: 'bg-emerald-600', chip: 'bg-emerald-100 text-emerald-800', label: 'Analyzer ready' }
       : diagnosis.status === 'warn'
-        ? { dot: 'bg-amber-500', chip: 'bg-amber-100 text-amber-800', label: 'Analyzer ready — no backup' }
+        ? {
+            dot: 'bg-amber-500',
+            chip: 'bg-amber-100 text-amber-800',
+            label: 'Analyzer ready — no backup',
+          }
         : { dot: 'bg-rose-600', chip: 'bg-rose-100 text-rose-800', label: 'Analyzer needed' };
   return (
     <div className="space-y-1.5" data-testid="admin-analyzer-readiness">

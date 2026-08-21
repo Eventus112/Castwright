@@ -16,14 +16,8 @@ import { manuscriptActions } from '../store/manuscript-slice';
 import { chaptersActions } from '../store/chapters-slice';
 import { useLocalAnalyzerGuard } from '../hooks/use-local-analyzer-guard';
 import { ManuscriptDiffModal } from '../components/manuscript-diff';
-import {
-  diffSentenceArrays,
-  splitIntoSentences,
-} from '../lib/manuscript-diff';
-import {
-  detectOverrideConflicts,
-  scanCandidateChapters,
-} from '../lib/chapter-override-conflict';
+import { diffSentenceArrays, splitIntoSentences } from '../lib/manuscript-diff';
+import { detectOverrideConflicts, scanCandidateChapters } from '../lib/chapter-override-conflict';
 import type { Sentence } from '../lib/types';
 
 const TEXT_EXT_RE = /\.(md|markdown|txt|text)$/i;
@@ -37,7 +31,11 @@ export function UploadView() {
      pulled-but-uncurated tag is selectable. Populated by fetchAnalyzerModels on
      mount; empty (offline) falls back to the curated catalog. */
   const localAnalyzerModels = useAppSelector((s) => s.account.localAnalyzerModels);
-  const analysisModelGroups = buildModelOptionGroups(buildLocalModelOptions(localAnalyzerModels));
+  const openaiAnalyzerModels = useAppSelector((s) => s.account.openaiAnalyzerModels);
+  const analysisModelGroups = buildModelOptionGroups(
+    buildLocalModelOptions(localAnalyzerModels),
+    openaiAnalyzerModels ?? [],
+  );
   useEffect(() => {
     void dispatch(fetchAnalyzerModels());
   }, [dispatch]);
@@ -172,9 +170,7 @@ export function UploadView() {
      runs at analyse time. */
   const overrideConflicts = useMemo(() => {
     if (!manuscript.pendingReupload) return [];
-    const newChapters = scanCandidateChapters(
-      manuscript.pendingReupload.newCandidate.sourceText,
-    );
+    const newChapters = scanCandidateChapters(manuscript.pendingReupload.newCandidate.sourceText);
     return detectOverrideConflicts(currentChapters, newChapters);
   }, [manuscript.pendingReupload, currentChapters]);
 
@@ -245,9 +241,7 @@ export function UploadView() {
               <MixedHeading level="h1" regular="Drop your manuscript to" bold="meet the cast" />
             )}
           </div>
-          {!isReuploading && (
-            <p className="mt-3 text-sm text-ink/60">{TAGLINE_SHORT}</p>
-          )}
+          {!isReuploading && <p className="mt-3 text-sm text-ink/60">{TAGLINE_SHORT}</p>}
           <p className="mt-4 text-lg text-ink/70">
             {isReuploading ? (
               <>
@@ -265,8 +259,8 @@ export function UploadView() {
               </>
             ) : (
               <>
-                We'll read the book, find every speaking character, and synthesise a voice
-                profile for each one — generated from the prose, not picked from a list.
+                We'll read the book, find every speaking character, and synthesise a voice profile
+                for each one — generated from the prose, not picked from a list.
               </>
             )}
           </p>

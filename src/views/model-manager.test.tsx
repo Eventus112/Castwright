@@ -12,7 +12,12 @@ import { settingsSlice } from '../store/settings-slice';
 import { upgradeSlice } from '../store/upgrade-slice';
 import { notificationsSlice } from '../store/notifications-slice';
 import { ModelManagerView } from './model-manager';
-import { api, type ModelControlResult, type ModelInventoryResponse, type ModelInventoryItem } from '../lib/api';
+import {
+  api,
+  type ModelControlResult,
+  type ModelInventoryResponse,
+  type ModelInventoryItem,
+} from '../lib/api';
 import type { UserSettings } from '../lib/types';
 
 /* #2533 D — `ModelInventoryItem.installState` is a hand-mirrored copy of the
@@ -77,6 +82,8 @@ vi.mock('../lib/api', () => ({
     getUserSettings: vi.fn(),
     putUserSettings: vi.fn(),
     putGeminiKey: vi.fn(),
+    putOpenAIKey: vi.fn(),
+    getOpenAIModels: vi.fn().mockResolvedValue({ models: ['castwright', 'qwen-remote'] }),
     restartSidecar: vi.fn(),
     getModelsStatus: vi.fn().mockResolvedValue(MODELS_STATUS),
     getOllamaHealth: vi.fn().mockResolvedValue({
@@ -244,8 +251,12 @@ describe('ModelManagerView — inventory', () => {
     renderManager();
     const kokoro = await screen.findByTestId('model-row-kokoro');
     expect(within(kokoro).getByText('Loaded')).toBeInTheDocument();
-    expect(within(screen.getByTestId('model-row-qwen-base')).getByText('Installed')).toBeInTheDocument();
-    expect(within(screen.getByTestId('model-row-coqui')).getByText('Not installed')).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('model-row-qwen-base')).getByText('Installed'),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('model-row-coqui')).getByText('Not installed'),
+    ).toBeInTheDocument();
   });
 
   it('flags the default and fallback engines', async () => {
@@ -258,7 +269,9 @@ describe('ModelManagerView — inventory', () => {
   it('loads an installed-but-unloaded engine via the control pill', async () => {
     renderManager();
     const qwen = await screen.findByTestId('model-row-qwen-base');
-    within(qwen).getByRole('button', { name: /load model/i }).click();
+    within(qwen)
+      .getByRole('button', { name: /load model/i })
+      .click();
     await waitFor(() => expect(mockLoad).toHaveBeenCalledWith({ engine: 'qwen' }));
   });
 
@@ -304,7 +317,9 @@ describe('ModelManagerView — inventory', () => {
         }),
     );
     const qwen = await screen.findByTestId('model-row-qwen-base');
-    within(qwen).getByRole('button', { name: /load model/i }).click();
+    within(qwen)
+      .getByRole('button', { name: /load model/i })
+      .click();
 
     await waitFor(() =>
       expect(within(qwen).getByRole('button', { name: /^loading/i })).toBeDisabled(),
@@ -346,7 +361,9 @@ describe('ModelManagerView — inventory', () => {
 
     renderManager();
     const row = await screen.findByTestId('model-row-ollama:llama3.1:8b');
-    within(row).getByRole('button', { name: /load model/i }).click();
+    within(row)
+      .getByRole('button', { name: /load model/i })
+      .click();
     await waitFor(() => expect(api.loadAnalyzer).toHaveBeenCalledWith({ model: 'llama3.1:8b' }));
   });
 });
@@ -384,10 +401,10 @@ describe('ModelManagerView — qwen-base17 row', () => {
   it('Load calls api.loadSidecar with { engine: "qwen", model: "1.7b" }', async () => {
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base17');
-    within(row).getByRole('button', { name: /load model/i }).click();
-    await waitFor(() =>
-      expect(mockLoad).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }),
-    );
+    within(row)
+      .getByRole('button', { name: /load model/i })
+      .click();
+    await waitFor(() => expect(mockLoad).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }));
   });
 
   it('Unload calls api.unloadSidecar with { engine: "qwen", model: "1.7b" }', async () => {
@@ -398,13 +415,16 @@ describe('ModelManagerView — qwen-base17 row', () => {
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base17');
     within(row).getByRole('button', { name: /stop/i }).click();
-    await waitFor(() =>
-      expect(mockUnload).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }),
-    );
+    await waitFor(() => expect(mockUnload).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }));
   });
 
   it('Remove opens the confirm modal and calls api.removeModel("qwen-base17")', async () => {
-    mockRemove.mockResolvedValue({ ok: true, id: 'qwen-base17', removed: true, freedBytes: 2_000_000_000 });
+    mockRemove.mockResolvedValue({
+      ok: true,
+      id: 'qwen-base17',
+      removed: true,
+      freedBytes: 2_000_000_000,
+    });
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base17');
     within(row).getByTestId('model-remove-qwen-base17').click();
@@ -416,7 +436,9 @@ describe('ModelManagerView — qwen-base17 row', () => {
   it('qwen-base Load still calls without model qualifier (not affected by 1.7b change)', async () => {
     renderManager();
     const qwen = await screen.findByTestId('model-row-qwen-base');
-    within(qwen).getByRole('button', { name: /load model/i }).click();
+    within(qwen)
+      .getByRole('button', { name: /load model/i })
+      .click();
     await waitFor(() => expect(mockLoad).toHaveBeenCalledWith({ engine: 'qwen' }));
   });
 });
@@ -448,11 +470,17 @@ describe('ModelManagerView — load/stop failure surfacing (#2349)', () => {
     vi.mocked(api.loadSidecar).mockResolvedValue({ status: 'error', error: 'OOM on GPU' });
     const { store } = renderManager();
     const row = await screen.findByTestId('model-row-qwen-base17');
-    within(row).getByRole('button', { name: /load model/i }).click();
+    within(row)
+      .getByRole('button', { name: /load model/i })
+      .click();
 
-    await waitFor(() => expect(api.loadSidecar).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }));
     await waitFor(() =>
-      expect(store.getState().notifications.toasts.some((t) => t.message.includes('OOM on GPU'))).toBe(true),
+      expect(api.loadSidecar).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }),
+    );
+    await waitFor(() =>
+      expect(
+        store.getState().notifications.toasts.some((t) => t.message.includes('OOM on GPU')),
+      ).toBe(true),
     );
   });
 
@@ -466,13 +494,17 @@ describe('ModelManagerView — load/stop failure surfacing (#2349)', () => {
     const row = await screen.findByTestId('model-row-qwen-base17');
     within(row).getByRole('button', { name: /stop/i }).click();
 
-    await waitFor(() => expect(api.unloadSidecar).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }));
+    await waitFor(() =>
+      expect(api.unloadSidecar).toHaveBeenCalledWith({ engine: 'qwen', model: '1.7b' }),
+    );
     await waitFor(() =>
       expect(
         store
           .getState()
           .notifications.toasts.some(
-            (t) => t.message.includes('sidecar went away') && t.message.includes(`Stop ${QWEN_BASE17_ITEM.label} failed:`),
+            (t) =>
+              t.message.includes('sidecar went away') &&
+              t.message.includes(`Stop ${QWEN_BASE17_ITEM.label} failed:`),
           ),
       ).toBe(true),
     );
@@ -483,7 +515,9 @@ describe('ModelManagerView — load/stop failure surfacing (#2349)', () => {
     const callsBefore = vi.mocked(api.getModelInventory).mock.calls.length;
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base17');
-    within(row).getByRole('button', { name: /load model/i }).click();
+    within(row)
+      .getByRole('button', { name: /load model/i })
+      .click();
 
     await waitFor(() => expect(api.loadSidecar).toHaveBeenCalled());
     /* The initial-mount fetch already happened before the click; a failed action
@@ -548,6 +582,46 @@ describe('ModelManagerView — moved settings form', () => {
 
 const putUserSettings = vi.mocked(api.putUserSettings);
 const putGeminiKey = vi.mocked(api.putGeminiKey);
+const putOpenAIKey = vi.mocked(api.putOpenAIKey);
+
+describe('ModelManagerView — OpenAI-compatible provider', () => {
+  it('shows endpoint/model/key fields and saves the editable connection', async () => {
+    putUserSettings.mockResolvedValue({
+      ...SETTINGS_FIXTURE,
+      analyzerProvider: 'openai',
+      openaiBaseUrl: 'http://host.docker.internal:5001/v1',
+      openaiModel: 'qwen-remote',
+    });
+    putOpenAIKey.mockResolvedValue({
+      ...SETTINGS_FIXTURE,
+      analyzerProvider: 'openai',
+      openaiBaseUrl: 'http://host.docker.internal:5001/v1',
+      openaiModel: 'castwright',
+      openaiApiKeyStatus: 'set',
+    });
+    const user = userEvent.setup();
+    renderManager({
+      analyzerProvider: 'openai',
+      openaiBaseUrl: 'http://host.docker.internal:5001/v1',
+      openaiModel: 'castwright',
+      openaiApiKeyStatus: 'unset',
+    });
+
+    expect(await screen.findByTestId('account-openai-base-url')).toHaveValue(
+      'http://host.docker.internal:5001/v1',
+    );
+    await user.clear(screen.getByTestId('account-openai-model'));
+    await user.type(screen.getByTestId('account-openai-model'), 'qwen-remote');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(putUserSettings).toHaveBeenCalled());
+    expect(putUserSettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      analyzerProvider: 'openai',
+      openaiBaseUrl: 'http://host.docker.internal:5001/v1',
+      openaiModel: 'qwen-remote',
+    });
+  });
+});
 
 describe('ModelManagerView — Gemini API key field', () => {
   it('typing a key + Save key fires putGeminiKey with the trimmed value', async () => {
@@ -576,7 +650,9 @@ describe('ModelManagerView — Gemini API key field', () => {
     await user.type(await screen.findByLabelText(/^gemini api key$/i), 'should-not-leak');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
     await waitFor(() => expect(putUserSettings).toHaveBeenCalledTimes(1));
-    expect((putUserSettings.mock.calls[0][0] as Record<string, unknown>).geminiApiKey).toBeUndefined();
+    expect(
+      (putUserSettings.mock.calls[0][0] as Record<string, unknown>).geminiApiKey,
+    ).toBeUndefined();
     expect(putGeminiKey).not.toHaveBeenCalled();
   });
 });
@@ -590,9 +666,9 @@ describe('ModelManagerView — voice engine preferences', () => {
 
   it('defaults auto-start to true when the field is absent', async () => {
     renderManager({ autoStartSidecar: undefined });
-    expect(((await screen.findByTestId('account-auto-start-sidecar')) as HTMLInputElement).checked).toBe(
-      true,
-    );
+    expect(
+      ((await screen.findByTestId('account-auto-start-sidecar')) as HTMLInputElement).checked,
+    ).toBe(true);
   });
 
   it('shows the restart-required pill when auto-start is flipped', async () => {
@@ -636,10 +712,12 @@ describe('ModelManagerView — analyzer split', () => {
       analyzerPhase1Model: 'gemini-3.1-flash-lite',
       analyzerPhase1MinLagChapters: 5,
     });
-    expect(((await screen.findByTestId('account-analyzer-phase0-model')) as HTMLSelectElement).value).toBe(
-      'gemma-4-31b-it',
+    expect(
+      ((await screen.findByTestId('account-analyzer-phase0-model')) as HTMLSelectElement).value,
+    ).toBe('gemma-4-31b-it');
+    expect((screen.getByTestId('account-analyzer-phase1-min-lag') as HTMLInputElement).value).toBe(
+      '5',
     );
-    expect((screen.getByTestId('account-analyzer-phase1-min-lag') as HTMLInputElement).value).toBe('5');
   });
 
   it('round-trips the analyzer fields, sending null for a blanked min-lag', async () => {
@@ -701,7 +779,9 @@ describe('ModelManagerView — per-row install (fs-23 follow-up)', () => {
       within(card).getByRole('heading', { name: /Local analyzer \(Ollama\)/i, level: 3 }),
     ).toBeInTheDocument();
     expect(within(card).queryByRole('heading', { name: /Coqui XTTS v2/i, level: 3 })).toBeNull();
-    expect(within(card).queryByRole('heading', { name: /Qwen3-TTS \(bespoke/i, level: 3 })).toBeNull();
+    expect(
+      within(card).queryByRole('heading', { name: /Qwen3-TTS \(bespoke/i, level: 3 }),
+    ).toBeNull();
     expect(within(card).queryByRole('heading', { name: /Whisper ASR/i, level: 3 })).toBeNull();
   });
 });
@@ -757,9 +837,7 @@ describe('ModelManagerView — per-model keep-alive control', () => {
     });
     renderManager();
     await screen.findByTestId('keepalive-ollama:qwen36-castwright:latest');
-    expect(
-      screen.queryByTestId('keepalive-reset-ollama:qwen36-castwright:latest'),
-    ).toBeNull();
+    expect(screen.queryByTestId('keepalive-reset-ollama:qwen36-castwright:latest')).toBeNull();
   });
 
   it('reset button deletes the model key from the map and saves', async () => {
@@ -775,9 +853,7 @@ describe('ModelManagerView — per-model keep-alive control', () => {
       analyzerKeepAliveByModel: { 'qwen36-castwright:latest': 300, 'qwen3.5:4b': 120 },
     });
 
-    const resetBtn = await screen.findByTestId(
-      'keepalive-reset-ollama:qwen36-castwright:latest',
-    );
+    const resetBtn = await screen.findByTestId('keepalive-reset-ollama:qwen36-castwright:latest');
     fireEvent.click(resetBtn);
 
     await waitFor(() =>
@@ -950,9 +1026,13 @@ describe('ModelManagerView — health honesty + repair + tier grouping', () => {
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base');
     await waitFor(() =>
-      expect(within(row).getByTestId('model-install-toggle-qwen-base')).toHaveTextContent(/Install/),
+      expect(within(row).getByTestId('model-install-toggle-qwen-base')).toHaveTextContent(
+        /Install/,
+      ),
     );
-    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(/Repair/);
+    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(
+      /Repair/,
+    );
     expect(within(row).getByText(/not installed/i)).toBeInTheDocument();
     expect(within(row).queryByText(/needs repair/i)).toBeNull();
   });
@@ -1006,7 +1086,10 @@ describe('ModelManagerView — health honesty + repair + tier grouping', () => {
        body reads, #1647) — set qwen package-missing there too so it stays Repair. */
     vi.mocked(api.getModelsStatus).mockResolvedValue({
       ...MODELS_STATUS,
-      engines: { ...MODELS_STATUS.engines, qwen: { state: 'package-missing', packageBroken: false, packageFault: 'ok' } },
+      engines: {
+        ...MODELS_STATUS.engines,
+        qwen: { state: 'package-missing', packageBroken: false, packageFault: 'ok' },
+      },
     });
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base');
@@ -1043,14 +1126,21 @@ describe('ModelManagerView — health honesty + repair + tier grouping', () => {
     });
     vi.mocked(api.getModelsStatus).mockResolvedValue({
       ...MODELS_STATUS,
-      engines: { ...MODELS_STATUS.engines, qwen: { state: 'ready', packageBroken: true, packageFault: 'missing' } },
+      engines: {
+        ...MODELS_STATUS.engines,
+        qwen: { state: 'ready', packageBroken: true, packageFault: 'missing' },
+      },
     });
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base');
     await waitFor(() =>
-      expect(within(row).getByTestId('model-install-toggle-qwen-base')).toHaveTextContent(/Install/),
+      expect(within(row).getByTestId('model-install-toggle-qwen-base')).toHaveTextContent(
+        /Install/,
+      ),
     );
-    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(/Repair/);
+    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(
+      /Repair/,
+    );
   });
 
   /* Regression (#1647): the toggle label and the installer card body must derive
@@ -1080,14 +1170,19 @@ describe('ModelManagerView — health honesty + repair + tier grouping', () => {
     });
     vi.mocked(api.getModelsStatus).mockResolvedValue({
       ...MODELS_STATUS,
-      engines: { ...MODELS_STATUS.engines, qwen: { state: 'package-missing', packageBroken: false, packageFault: 'ok' } },
+      engines: {
+        ...MODELS_STATUS.engines,
+        qwen: { state: 'package-missing', packageBroken: false, packageFault: 'ok' },
+      },
     });
     renderManager();
     const row = await screen.findByTestId('model-row-qwen-base');
     await waitFor(() =>
       expect(within(row).getByTestId('model-install-toggle-qwen-base')).toHaveTextContent(/Repair/),
     );
-    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(/Update/);
+    expect(within(row).getByTestId('model-install-toggle-qwen-base')).not.toHaveTextContent(
+      /Update/,
+    );
   });
 
   it('Repair→onInstalled triggers api.restartSidecar for a package-missing row', async () => {
@@ -1319,10 +1414,16 @@ describe('ModelManagerView — settings form accordion shell', () => {
        multiple matches and confirm at least one is the aria-expanded section toggle. */
     const defaultsBtns = await screen.findAllByRole('button', { name: /defaults for new books/i });
     expect(defaultsBtns.length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: /two-model analyzer split/i }).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByRole('button', { name: /two-model analyzer split/i }).length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: /voice engine/i }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: /server configuration/i }).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: /install \/ update analyzer/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /server configuration/i }).length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getAllByRole('button', { name: /install \/ update analyzer/i }).length,
+    ).toBeGreaterThan(0);
 
     /* Controls inside the sections are accessible (sections start open). */
     expect(screen.getByTestId('account-auto-start-sidecar')).toBeInTheDocument();

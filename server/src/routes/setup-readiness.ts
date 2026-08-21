@@ -26,12 +26,16 @@ import { getActiveSupervisor } from '../tts/sidecar-supervisor.js';
 import { venvCorePackageInstalled } from '../tts/venv-core-package.js';
 import { probeFfmpeg } from '../diagnostics/ffmpeg.js';
 import {
-  diagnoseSidecar, diagnoseTts, diagnoseFfmpeg, diagnoseAnalyzer, anyAnalyzerModelPulled,
+  diagnoseSidecar,
+  diagnoseTts,
+  diagnoseFfmpeg,
+  diagnoseAnalyzer,
+  anyAnalyzerModelPulled,
 } from './setup-diagnosis.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
+import { resolveOpenAICompatibleConfig } from '../analyzer/openai-compatible.js';
 
 /* Repo root computed locally, exactly as models-inventory.ts does (this file
    is also under server/src/routes/, so '..','..','..' lands on the repo root).
@@ -40,21 +44,40 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 
 export type BlockerCause =
   // sidecar
-  | 'python-missing' | 'venv-missing' | 'venv-broken' | 'supervisor-exhausted'
-  | 'supervisor-tripped' | 'unreachable-transient' | 'unreachable-no-supervisor'
+  | 'python-missing'
+  | 'venv-missing'
+  | 'venv-broken'
+  | 'supervisor-exhausted'
+  | 'supervisor-tripped'
+  | 'unreachable-transient'
+  | 'unreachable-no-supervisor'
   // tts
-  | 'sidecar-blocked' | 'no-engine-installed' | 'weights-missing'
-  | 'cannot-confirm-engine' | 'package-broken'
+  | 'sidecar-blocked'
+  | 'no-engine-installed'
+  | 'weights-missing'
+  | 'cannot-confirm-engine'
+  | 'package-broken'
   // ffmpeg
-  | 'ffmpeg-missing' | 'ffprobe-missing' | 'both-missing' | 'ffmpeg-too-old'
+  | 'ffmpeg-missing'
+  | 'ffprobe-missing'
+  | 'both-missing'
+  | 'ffmpeg-too-old'
   // analyzer
-  | 'ollama-unreachable' | 'model-not-pulled' | 'no-gemini-key'
+  | 'ollama-unreachable'
+  | 'model-not-pulled'
+  | 'no-gemini-key'
   // shared terminal
   | 'pass';
 
 export type BlockerActionKind =
-  | 'venv-bootstrap' | 'qwen-install' | 'kokoro-install' | 'coqui-install'
-  | 'sidecar-restart' | 'ollama-install' | 'ollama-pull' | 'navigate';
+  | 'venv-bootstrap'
+  | 'qwen-install'
+  | 'kokoro-install'
+  | 'coqui-install'
+  | 'sidecar-restart'
+  | 'ollama-install'
+  | 'ollama-pull'
+  | 'navigate';
 
 export interface BlockerAction {
   kind: BlockerActionKind;
@@ -77,7 +100,12 @@ export interface BlockerDiagnosis {
 export interface SetupReadiness {
   ready: boolean;
   completedAt: string | null;
-  blockers: { sidecar: BlockerDiagnosis; ffmpeg: BlockerDiagnosis; tts: BlockerDiagnosis; analyzer: BlockerDiagnosis };
+  blockers: {
+    sidecar: BlockerDiagnosis;
+    ffmpeg: BlockerDiagnosis;
+    tts: BlockerDiagnosis;
+    analyzer: BlockerDiagnosis;
+  };
   info: { gpu: string; vramTotalMb: number | null };
 }
 
@@ -91,7 +119,10 @@ export function buildSetupReadiness(input: {
   completedAt?: string | null;
 }): SetupReadiness {
   const blockers = {
-    sidecar: input.sidecar, ffmpeg: input.ffmpeg, tts: input.tts, analyzer: input.analyzer,
+    sidecar: input.sidecar,
+    ffmpeg: input.ffmpeg,
+    tts: input.tts,
+    analyzer: input.analyzer,
   };
   return {
     ready: Object.values(blockers).every((b) => b.status === 'pass' || b.status === 'warn'),
@@ -128,12 +159,18 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
   });
 
   const VOICE_ENGINE_IDS = ['kokoro', 'qwen', 'coqui'] as const;
-  const noEngineAtAll = VOICE_ENGINE_IDS.every((id) => models.engines[id].state === 'not-installed');
+  const noEngineAtAll = VOICE_ENGINE_IDS.every(
+    (id) => models.engines[id].state === 'not-installed',
+  );
   const anyEngineUsable = VOICE_ENGINE_IDS.some((id) => engineUsable(models.engines[id]));
   const weightsMissingEngine =
-    models.engines.kokoro.state === 'weights-missing' ? 'kokoro' :
-    models.engines.qwen.state === 'weights-missing' ? 'qwen' :
-    models.engines.coqui.state === 'weights-missing' ? 'coqui' : null;
+    models.engines.kokoro.state === 'weights-missing'
+      ? 'kokoro'
+      : models.engines.qwen.state === 'weights-missing'
+        ? 'qwen'
+        : models.engines.coqui.state === 'weights-missing'
+          ? 'coqui'
+          : null;
 
   const tts = diagnoseTts(sidecar, {
     noEngineAtAll,
@@ -144,11 +181,15 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
   });
 
   const {
-    ffmpeg: ffmpegPresent, ffprobe: ffprobePresent, version, belowFloor, minimum,
+    ffmpeg: ffmpegPresent,
+    ffprobe: ffprobePresent,
+    version,
+    belowFloor,
+    minimum,
   } = probeFfmpeg();
   const ffmpeg = diagnoseFfmpeg({ ffmpegPresent, ffprobePresent, version, belowFloor, minimum });
 
-  const openAI = resolveOpenAICompatibleConfigFromEnv();
+  const openAI = resolveOpenAICompatibleConfig();
   let analyzer: BlockerDiagnosis;
   if (openAI.enabled) {
     analyzer = diagnoseAnalyzer({ provider: 'openai', model: openAI.model });
@@ -173,7 +214,10 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
 
   res.json(
     buildSetupReadiness({
-      sidecar, tts, ffmpeg, analyzer,
+      sidecar,
+      tts,
+      ffmpeg,
+      analyzer,
       gpu: models.info.gpu,
       vramTotalMb: models.info.vramTotalMb,
       completedAt: getResolvedSetupCompletedAt(),
@@ -210,7 +254,7 @@ setupReadinessRouter.post('/smoke', async (_req: Request, res: Response) => {
   let analyzerOk = false;
   let analyzerDetail = '';
   try {
-    const openAI = resolveOpenAICompatibleConfigFromEnv();
+    const openAI = resolveOpenAICompatibleConfig();
     if (openAI.enabled) {
       analyzerOk = true;
       analyzerDetail = `OpenAI-compatible configured · ${openAI.model}`;

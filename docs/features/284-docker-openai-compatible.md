@@ -44,7 +44,9 @@ mutation survives replacing the image.
 
 ### Analyzer provider
 
-`ANALYZER_PROVIDER=openai` is an ops-level override. It selects a new `OpenAICompatibleAnalyzer` regardless of the saved local/Gemini account default, so a Compose deployment is deterministic from environment alone. Required variables are:
+OpenAI-compatible analysis is editable under **Model Manager → Server configuration**. The user selects Ollama, OpenAI-compatible, or Gemini; OpenAI endpoint/model changes apply on the next request and the optional API key is stored through a dedicated redacted endpoint. The server discovers available model ids through the configured provider's standard `GET /v1/models` endpoint and adds them to analysis-model pickers.
+
+`ANALYZER_PROVIDER=openai` remains an optional ops-level override. It wins over saved UI settings so a Compose deployment can still be pinned deterministically from environment alone. Its variables are:
 
 - `OPENAI_BASE_URL` — API root such as `http://host.docker.internal:8000/v1`; a full `/chat/completions` URL is also accepted.
 - `OPENAI_MODEL` — model id sent to the endpoint.
@@ -54,12 +56,11 @@ The analyzer uses the standard `POST /v1/chat/completions` messages contract, pr
 
 The public analysis metadata remains `engine: 'gemini' | 'local'` in this first slice. `openai` is a provider selection behind the existing remote/cloud engine envelope, avoiding a repository-wide OpenAPI/UI migration unrelated to endpoint connectivity. The effective model id is still reported verbatim.
 
-`GET /api/user/settings` adds only safe read-only effective-provider metadata
-for the browser: provider `openai` and the effective model id. This prevents the
-analysis screen and setup checker from probing or waiting for Ollama when the
-deployment override is active, including model ids containing `:`. The API key
-and endpoint URL are never returned. This is runtime visibility, not a third
-editable engine or a saved-settings schema migration.
+`GET /api/user/settings` exposes the editable non-secret provider, endpoint and
+model plus safe effective-provider metadata. It returns only key status, never
+the OpenAI-compatible API key itself. This prevents the analysis screen and
+setup checker from probing or waiting for Ollama when OpenAI-compatible mode is
+active, including model ids containing `:`.
 
 ### Migration and reversibility
 
@@ -95,19 +96,17 @@ prior deployment model without touching data.
 
 ### Manual acceptance walkthrough
 
-1. Copy `.env.docker.example` to `.env`, set `ANALYZER_PROVIDER=openai`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
-2. Run `docker compose up --build -d`; open `http://127.0.0.1:8080/`; the setup/library UI loads and `/api/health` reports the env as loaded.
-3. Import the canonical Coalfall fixture and run analysis against a test OpenAI-compatible endpoint; the selected model id appears in analysis progress and the cast is produced.
-4. Restart/rebuild the container and confirm the imported book and user settings remain under the configured data directory.
-5. On an NVIDIA Linux host with Container Toolkit installed, confirm readiness reports CUDA and the configured Hugging Face cache is visible without network access.
+1. Run `docker compose up --build -d` and open Castwright.
+2. Open Model Manager → Server configuration, select OpenAI-compatible endpoint, enter the API root and model (plus an optional key), then save.
+3. Refresh models and confirm ids returned by `GET /v1/models` appear in the analysis-model pickers.
+4. Import the canonical Coalfall fixture and run analysis; the selected model id appears in analysis progress and the cast is produced.
+5. Restart/rebuild the container and confirm the imported book and user settings remain under the configured data directory.
+6. On an NVIDIA Linux host with Container Toolkit installed, confirm readiness reports CUDA and the configured Hugging Face cache is visible without network access.
 
 ## Out of scope
 
 - Publishing to GHCR or changing upstream `release.yml`; the fork can add registry credentials/repository naming after the local image contract is stable.
 - OpenAI Responses API, Anthropic Messages, or provider-specific extensions.
-- A third editable analysis-engine choice in Account/Setup UI; this slice is
-  env-driven for reproducible headless deployment and exposes only read-only
-  effective-provider status to those screens.
 - Automatic public-LAN exposure, TLS termination, router/firewall changes, or reverse-proxy provisioning.
 - Bundling Ollama; Docker deployments use the configured OpenAI-compatible endpoint, an external Ollama instance, or Gemini.
 

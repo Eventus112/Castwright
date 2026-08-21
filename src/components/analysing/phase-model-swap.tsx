@@ -54,7 +54,11 @@ export function PhaseModelSwap({ phaseId, isActive }: PhaseModelSwapProps) {
      holds while a just-pulled model still becomes selectable without a reload.
      Empty (not yet fetched / offline) falls back to the curated catalog. */
   const localAnalyzerModels = useAppSelector((s) => s.account.localAnalyzerModels);
-  const modelGroups = buildModelOptionGroups(buildLocalModelOptions(localAnalyzerModels));
+  const openaiAnalyzerModels = useAppSelector((s) => s.account.openaiAnalyzerModels);
+  const modelGroups = buildModelOptionGroups(
+    buildLocalModelOptions(localAnalyzerModels),
+    openaiAnalyzerModels ?? [],
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -67,8 +71,7 @@ export function PhaseModelSwap({ phaseId, isActive }: PhaseModelSwapProps) {
     /* No-op if the user picked the sentinel and the slice is already null,
        or the same id. Avoids a spurious save + toast. */
     if (next === rawValue) return;
-    const patch =
-      phaseId === 0 ? { analyzerPhase0Model: next } : { analyzerPhase1Model: next };
+    const patch = phaseId === 0 ? { analyzerPhase0Model: next } : { analyzerPhase1Model: next };
     void dispatch(saveAccountSettings(patch));
     setToast(
       isActive

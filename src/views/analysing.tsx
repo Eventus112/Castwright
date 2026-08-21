@@ -303,15 +303,17 @@ export function AnalysingView({
   const selectedModelExplicit = useAppSelector((s) => s.ui.selectedModelExplicit);
   const phase0Model = useAppSelector((s) => s.account.analyzerPhase0Model);
   const phase1Model = useAppSelector((s) => s.account.analyzerPhase1Model);
-  const resolvedAnalyzerProvider = useAppSelector(
-    (s) => s.account.resolvedAnalyzerProvider,
-  );
+  const resolvedAnalyzerProvider = useAppSelector((s) => s.account.resolvedAnalyzerProvider);
   /* Live local Ollama tags for the failed-retry model picker (curated ∪ live),
      so a model the user just pulled is selectable here. Fetched only AFTER a
      failure (gated on `error` below) — a healthy cloud run never probes Ollama,
      preserving the cloud-no-probe invariant. */
   const localAnalyzerModels = useAppSelector((s) => s.account.localAnalyzerModels);
-  const analyzerModelGroups = buildModelOptionGroups(buildLocalModelOptions(localAnalyzerModels));
+  const openaiAnalyzerModels = useAppSelector((s) => s.account.openaiAnalyzerModels);
+  const analyzerModelGroups = buildModelOptionGroups(
+    buildLocalModelOptions(localAnalyzerModels),
+    openaiAnalyzerModels ?? [],
+  );
   /* fs-65 Task 12 — per-book prosody annotation toggle. Eager default: absent
      (undefined) or true → checked; only an explicit false → unchecked. */
   const prosodyStored = useAppSelector(selectProsodyEnabled(bookId ?? null));
@@ -590,9 +592,7 @@ export function AnalysingView({
             /* dedupeKey collapses a burst across the five merge-base write
                sites into one toast. Wire kind is 'warning'; ToastKind is
                'warn' — they are different vocabularies, not a typo. */
-            dispatch(
-              notificationsActions.pushToast({ kind: 'warn', message, dedupeKey: code }),
-            );
+            dispatch(notificationsActions.pushToast({ kind: 'warn', message, dedupeKey: code }));
           },
         });
         if (cancelled || completedRef.current) return;
@@ -895,9 +895,7 @@ export function AnalysingView({
           /* dedupeKey collapses a burst across the five merge-base write
              sites into one toast. Wire kind is 'warning'; ToastKind is
              'warn' — they are different vocabularies, not a typo. */
-          dispatch(
-            notificationsActions.pushToast({ kind: 'warn', message, dedupeKey: code }),
-          );
+          dispatch(notificationsActions.pushToast({ kind: 'warn', message, dedupeKey: code }));
         },
       })
       .then(() => {
@@ -1046,7 +1044,8 @@ export function AnalysingView({
       } catch {}
       try {
         await api.unloadSidecar();
-        if (sidecarHadModel) setAnalyzerEvictionNotice('Voice engine unloaded to free VRAM for the analyzer.');
+        if (sidecarHadModel)
+          setAnalyzerEvictionNotice('Voice engine unloaded to free VRAM for the analyzer.');
       } catch {}
       /* loadAnalyzer's HTTP-level failures land in the result body
          (status:'error') with a 5xx — only fetch-itself failures throw.
@@ -1056,7 +1055,9 @@ export function AnalysingView({
         /* Warm the model the run will ACTUALLY execute on (per-run override or
            per-phase pick), not the server's configured default. Passing no model
            here is what made the view re-warm qwen behind a gemma run. */
-        const result = await api.loadAnalyzer(runModelToWarm ? { model: runModelToWarm } : undefined);
+        const result = await api.loadAnalyzer(
+          runModelToWarm ? { model: runModelToWarm } : undefined,
+        );
         if (result.status === 'error') {
           setAnalyzerLoadError(result.error || 'Analyzer failed to load. Check Ollama is running.');
           setPendingAnalyzerPill(null);

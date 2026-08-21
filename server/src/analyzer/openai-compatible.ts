@@ -40,6 +40,7 @@ import {
   summariseDetail,
   type SkillName,
 } from './gemini.js';
+import { getCachedUserSettings, getResolvedAnalyzerProvider } from '../workspace/user-settings.js';
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_ERROR_BYTES = 4 * 1024;
@@ -100,6 +101,12 @@ export function normaliseOpenAIBaseUrl(raw: string): string {
   return url.toString();
 }
 
+export function normaliseOpenAIModelsUrl(raw: string): string {
+  const endpoint = new URL(normaliseOpenAIBaseUrl(raw));
+  endpoint.pathname = endpoint.pathname.replace(/\/chat\/completions\/?$/, '/models');
+  return endpoint.toString();
+}
+
 function requireModel(raw: string): string {
   const model = raw.trim();
   if (!model) throw new Error('OPENAI_MODEL is required when ANALYZER_PROVIDER=openai.');
@@ -127,6 +134,26 @@ export function resolveOpenAICompatibleConfigFromEnv(): OpenAICompatibleEnvConfi
     endpoint,
     model,
     apiKey: process.env.OPENAI_API_KEY?.trim() ?? '',
+  };
+}
+
+/** Effective runtime configuration. Environment values remain the highest
+    precedence ops override; otherwise the Model Manager's saved provider,
+    endpoint, model and redacted credential are used immediately. */
+export function resolveOpenAICompatibleConfig(): OpenAICompatibleEnvConfig {
+  const fromEnv = resolveOpenAICompatibleConfigFromEnv();
+  if (fromEnv.enabled) return fromEnv;
+  if (getResolvedAnalyzerProvider() !== 'openai') return { enabled: false };
+
+  const settings = getCachedUserSettings();
+  const baseUrl = settings.openaiBaseUrl.trim();
+  const model = requireModel(settings.openaiModel);
+  return {
+    enabled: true,
+    baseUrl,
+    endpoint: normaliseOpenAIBaseUrl(baseUrl),
+    model,
+    apiKey: settings.openaiApiKey?.trim() ?? '',
   };
 }
 

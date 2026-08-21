@@ -227,9 +227,12 @@ reverse proxy, firewall policy, or VPN such as Tailscale. Inside the container,
 the server intentionally binds `0.0.0.0:8080`; `LAN_HTTPS` stays disabled so
 TLS termination remains outside the container.
 
-An analyzer on the Docker host is reachable through
-`http://host.docker.internal:<port>/v1`. OpenAI-compatible values are passed at
-container runtime from `.env`; they are not baked into image layers. Stop the
+Configure the analyzer in **Model Manager → Server configuration**. Choose
+Ollama, OpenAI-compatible, or Gemini; for a service on the Docker host use
+`http://host.docker.internal:<port>/v1`. Castwright reads available
+OpenAI-compatible model ids from `GET /v1/models`. The optional
+`ANALYZER_PROVIDER=openai` values in `.env` are an administrative override and
+take precedence over the UI; they are never baked into image layers. Stop the
 deployment without deleting data with:
 
 ```bash
@@ -265,7 +268,7 @@ Castwright is tested against **ffmpeg 6.0 and newer**. Below that we simply have
 
 Upgrade with `winget upgrade Gyan.FFmpeg` (Windows), `brew upgrade ffmpeg` (macOS), or `sudo apt install ffmpeg` on Ubuntu 24.04+ / Debian 13+, which ship 6.1 or newer.
 
-**Ubuntu 22.04 has no supported route to 6.0 in its own repositories** — its archive build is 4.4, and the `ffmpeg` snap is 4.3.1 (published 2020), i.e. *older*, so switching to it downgrades you. Either upgrade the OS to 24.04+, or install a newer ffmpeg yourself (a static build or a PPA you trust) and make sure it comes **first** on `PATH` — `/usr/bin` precedes `/snap/bin` and most manual install locations by default.
+**Ubuntu 22.04 has no supported route to 6.0 in its own repositories** — its archive build is 4.4, and the `ffmpeg` snap is 4.3.1 (published 2020), i.e. _older_, so switching to it downgrades you. Either upgrade the OS to 24.04+, or install a newer ffmpeg yourself (a static build or a PPA you trust) and make sure it comes **first** on `PATH` — `/usr/bin` precedes `/snap/bin` and most manual install locations by default.
 
 Then click **Re-check** in the wizard. If `ffmpeg -version` still reports the old build, an earlier PATH entry is shadowing the new one. (If the binary came from a zip or a different package manager, upgrade it the same way you installed it — `winget`/`brew` report "no installed package" for something they didn't install.)
 
@@ -358,11 +361,11 @@ Or the manual path: install Ollama from <https://ollama.com>, `ollama pull qwen3
 
 Castwright ships three **standard** voice engines that install automatically with the Python sidecar:
 
-| Engine | Profile | What it does |
-|---|---|---|
-| **Kokoro** (default) | all boxes | High-quality preset-catalogue TTS; eagerly loaded; ~1.1 GB weights. |
-| **Qwen3-TTS** | GPU only (NVIDIA / AMD) | Per-character bespoke voice design from the cast persona. `qwen-tts` is included in `requirements/nvidia-cuda.txt` and `requirements/amd-rocm.txt`, so it installs with the standard `pip install -r requirements/<profile>.txt` step. Weights (~2.5 GB) are fetched separately (see below). |
-| **Whisper ASR** | all boxes | Speech-to-text QA gate (`faster-whisper` ships in `requirements/base.txt`). Off by default (`SEG_ASR_ENABLED=0`); model weights are fetched on first ASR load. |
+| Engine               | Profile                 | What it does                                                                                                                                                                                                                                                                                 |
+| -------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Kokoro** (default) | all boxes               | High-quality preset-catalogue TTS; eagerly loaded; ~1.1 GB weights.                                                                                                                                                                                                                          |
+| **Qwen3-TTS**        | GPU only (NVIDIA / AMD) | Per-character bespoke voice design from the cast persona. `qwen-tts` is included in `requirements/nvidia-cuda.txt` and `requirements/amd-rocm.txt`, so it installs with the standard `pip install -r requirements/<profile>.txt` step. Weights (~2.5 GB) are fetched separately (see below). |
+| **Whisper ASR**      | all boxes               | Speech-to-text QA gate (`faster-whisper` ships in `requirements/base.txt`). Off by default (`SEG_ASR_ENABLED=0`); model weights are fetched on first ASR load.                                                                                                                               |
 
 **Coqui XTTS v2** is an **optional add-on** (not in any requirements overlay). Install it from **Admin → Model Manager → Optional add-ons → Coqui → Install**. The in-app installer runs `pip install coqui-tts` constrained against `base.txt` to preserve the shared `transformers<5.0` lockstep. Existing Coqui installs from before this release are preserved across upgrades (pip-install never uninstalls).
 
@@ -453,8 +456,9 @@ The native Flutter **Castwright** pairs to the server over the LAN and delta-syn
    ```
 
    `LAN_AUTH_TOKEN` is the **pairing token**. With `LAN_HTTPS=1` set, the server **won't start if the LAN cert is missing** — run step 1 first.
+
 3. The pairing values are served at `GET /api/export/lan` (`{ urls, protocol: "https", token, caFingerprint }`).
-4. In the app: **Pair a device** → scan the pairing QR or enter the server URL (`https://<lan-ip>:8443`), access token, and CA fingerprint. The app pins the CA itself, so — unlike the mobile *web* UI — **you do not install the root CA on the phone**.
+4. In the app: **Pair a device** → scan the pairing QR or enter the server URL (`https://<lan-ip>:8443`), access token, and CA fingerprint. The app pins the CA itself, so — unlike the mobile _web_ UI — **you do not install the root CA on the phone**.
 
 Build/sideload instructions for the app live in [`apps/android/README.md`](apps/android/README.md); the full design is [`docs/features/188-android-companion-app.md`](docs/features/188-android-companion-app.md).
 
@@ -470,7 +474,7 @@ automatic backup first), and restarts itself. No terminal commands.
 This works because Castwright uses a **versioned-directory layout**: each release
 lives in its own `releases/vX.Y.Z/` folder, a stable `launch.mjs` at the install
 root always runs the current one, and your data lives in shared siblings outside
-the release folders. An upgrade extracts the new release into a *fresh* folder and
+the release folders. An upgrade extracts the new release into a _fresh_ folder and
 only flips a pointer once it's ready — the running version is never touched, so a
 failed upgrade just keeps running the previous one. A fresh install already ships
 this machinery, so there is nothing to convert.

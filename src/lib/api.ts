@@ -944,9 +944,11 @@ function buildSolwayBayMockState(): BookStateResponse {
      1 = A') so none of them changes appearance — this is the single
      deliberate addition this task makes to the demo corpus. */
   const target = -16;
-  const driftPattern: Array<
-    { deltaFromTarget: number; twoPass: boolean; measurementSource?: 'ebur128' | 'loudnorm' } | null
-  > = [
+  const driftPattern: Array<{
+    deltaFromTarget: number;
+    twoPass: boolean;
+    measurementSource?: 'ebur128' | 'loudnorm';
+  } | null> = [
     { deltaFromTarget: 0.1, twoPass: true },
     { deltaFromTarget: -1.2, twoPass: true },
     { deltaFromTarget: 0.4, twoPass: true },
@@ -1500,23 +1502,41 @@ async function mockAnalyseManuscript(
           if (progress < 0.5) {
             // tick 1 — section 1 in-flight: committed 0, marker 6
             chapter = {
-              chapterIndex: 1, chapterTitle: 'Chapter 1', elapsedMs, estMs,
-              sectionsDone: 0, sectionsTotal: 5,
-              sentencesDone: 6, sentencesTotal: 120, inSentenceMode: true,
+              chapterIndex: 1,
+              chapterTitle: 'Chapter 1',
+              elapsedMs,
+              estMs,
+              sectionsDone: 0,
+              sectionsTotal: 5,
+              sentencesDone: 6,
+              sentencesTotal: 120,
+              inSentenceMode: true,
             };
           } else if (progress < 0.6) {
             // tick 2 — section 1 done: committed 60
             chapter = {
-              chapterIndex: 1, chapterTitle: 'Chapter 1', elapsedMs, estMs,
-              sectionsDone: 1, sectionsTotal: 5,
-              sentencesDone: 60, sentencesTotal: 120, inSentenceMode: true,
+              chapterIndex: 1,
+              chapterTitle: 'Chapter 1',
+              elapsedMs,
+              estMs,
+              sectionsDone: 1,
+              sectionsTotal: 5,
+              sentencesDone: 60,
+              sentencesTotal: 120,
+              inSentenceMode: true,
             };
           } else {
             // tick 3 — section 2 in-flight: committed 60 + marker 5 = 65 (never < 60)
             chapter = {
-              chapterIndex: 1, chapterTitle: 'Chapter 1', elapsedMs, estMs,
-              sectionsDone: 2, sectionsTotal: 5,
-              sentencesDone: 65, sentencesTotal: 120, inSentenceMode: true,
+              chapterIndex: 1,
+              chapterTitle: 'Chapter 1',
+              elapsedMs,
+              estMs,
+              sectionsDone: 2,
+              sectionsTotal: 5,
+              sentencesDone: 65,
+              sentencesTotal: 120,
+              inSentenceMode: true,
             };
           }
           live = { totalChapters: 2, chapters: [chapter] };
@@ -1525,8 +1545,12 @@ async function mockAnalyseManuscript(
           if (!heartbeatEmitted) {
             heartbeatEmitted = true;
             onHeartbeat?.({
-              phaseId: 0, receivedBytes: 4096, charsPerSec: 320,
-              elapsedMs, sinceLastChunkMs: 0, chapterIndex: 1,
+              phaseId: 0,
+              receivedBytes: 4096,
+              charsPerSec: 320,
+              elapsedMs,
+              sinceLastChunkMs: 0,
+              chapterIndex: 1,
             });
           }
         }
@@ -1778,7 +1802,11 @@ async function mockStreamQaRepair({ chapterId, onTick }: QaRepairArgs): Promise<
   });
 }
 
-async function mockGetChapterAudio({ bookId, chapterId, duration }: AudioArgs): Promise<ChapterAudio> {
+async function mockGetChapterAudio({
+  bookId,
+  chapterId,
+  duration,
+}: AudioArgs): Promise<ChapterAudio> {
   await wait(120);
   /* Quality Gate marketing/wiki screenshots (#1286) — force totalSec=600 for
      Saltgrave chapter 7 regardless of what `duration` the caller passes.
@@ -2288,12 +2316,15 @@ async function mockGetQaReport(bookId: string): Promise<BookQaReport> {
 }
 
 async function realResumeScoring(bookId: string): Promise<void> {
-  const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/resume-scoring`, { method: 'POST' });
+  const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/resume-scoring`, {
+    method: 'POST',
+  });
   if (!res.ok && res.status !== 409)
     throw new Error(
       `Resume scoring failed (${res.status}): ${(await res.text()) || res.statusText}`,
     );
-  if (res.status === 409) throw Object.assign(new Error('Book is currently generating.'), { code: 'generation-active' });
+  if (res.status === 409)
+    throw Object.assign(new Error('Book is currently generating.'), { code: 'generation-active' });
 }
 
 async function mockResumeScoring(_bookId: string): Promise<void> {
@@ -2969,7 +3000,9 @@ export function parseSubstagePhaseEvent(p: Record<string, unknown>): SubstagePha
     model: typeof p.model === 'string' ? p.model : undefined,
     engine: p.engine === 'local' || p.engine === 'gemini' ? p.engine : undefined,
     activityState:
-      p.activityState === 'loading' || p.activityState === 'waiting' || p.activityState === 'streaming'
+      p.activityState === 'loading' ||
+      p.activityState === 'waiting' ||
+      p.activityState === 'streaming'
         ? p.activityState
         : undefined,
     fallbackReason: typeof p.fallbackReason === 'string' ? p.fallbackReason : undefined,
@@ -3007,7 +3040,15 @@ export class DetectEmotionsError extends Error {
 
 async function realDetectEmotions(
   bookId: string,
-  { signal, model, chapterId, onPhase, onThrottle, onAnnotation, onChapterFailed }: DetectEmotionsOpts = {},
+  {
+    signal,
+    model,
+    chapterId,
+    onPhase,
+    onThrottle,
+    onAnnotation,
+    onChapterFailed,
+  }: DetectEmotionsOpts = {},
 ): Promise<DetectEmotionsResult> {
   const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/annotate-emotion`, {
     method: 'POST',
@@ -3100,15 +3141,33 @@ async function mockDetectEmotions(
 ): Promise<DetectEmotionsResult> {
   await wait(60);
   if (typeof chapterId === 'number') {
-    onPhase?.({ progress: 0.5, label: 'Detecting emotions', chapterId, chapterIndex: 1, totalChapters: 1 });
+    onPhase?.({
+      progress: 0.5,
+      label: 'Detecting emotions',
+      chapterId,
+      chapterIndex: 1,
+      totalChapters: 1,
+    });
     onAnnotation?.({ chapterId, annotations: [{ sentenceId: 1, emotion: 'excited' }] });
     await wait(300);
     onPhase?.({ progress: 1, label: 'Done' });
     return { annotatedChapters: 1, totalAnnotations: 1 };
   }
-  onPhase?.({ progress: 0.25, label: 'Detecting emotions', chapterId: 1, chapterIndex: 1, totalChapters: 2 });
+  onPhase?.({
+    progress: 0.25,
+    label: 'Detecting emotions',
+    chapterId: 1,
+    chapterIndex: 1,
+    totalChapters: 2,
+  });
   await wait(500);
-  onPhase?.({ progress: 0.5, label: 'Detecting emotions', chapterId: 1, chapterIndex: 1, totalChapters: 2 });
+  onPhase?.({
+    progress: 0.5,
+    label: 'Detecting emotions',
+    chapterId: 1,
+    chapterIndex: 1,
+    totalChapters: 2,
+  });
   onAnnotation?.({ chapterId: 1, annotations: [{ sentenceId: 1, emotion: 'excited' }] });
   await wait(500);
   onPhase?.({
@@ -3135,7 +3194,12 @@ export interface DetectInstructOpts {
   onThrottle?: (e: { chapterId: number; waitMs: number; reason: string }) => void;
   onAnnotation?: (e: {
     chapterId: number;
-    annotations: Array<{ sentenceId: number; text?: string; instruct?: string; vocalization?: boolean }>;
+    annotations: Array<{
+      sentenceId: number;
+      text?: string;
+      instruct?: string;
+      vocalization?: boolean;
+    }>;
   }) => void;
   onChapterFailed?: (e: { chapterId: number; message: string }) => void;
 }
@@ -3155,7 +3219,15 @@ export class DetectInstructError extends Error {
 
 async function realDetectInstruct(
   bookId: string,
-  { signal, model, chapterId, onPhase, onThrottle, onAnnotation, onChapterFailed }: DetectInstructOpts = {},
+  {
+    signal,
+    model,
+    chapterId,
+    onPhase,
+    onThrottle,
+    onAnnotation,
+    onChapterFailed,
+  }: DetectInstructOpts = {},
 ): Promise<DetectInstructResult> {
   const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/instruct-annotation`, {
     method: 'POST',
@@ -3253,17 +3325,31 @@ async function mockDetectInstruct(
 ): Promise<DetectInstructResult> {
   await wait(60);
   if (typeof chapterId === 'number') {
-    onPhase?.({ progress: 0.5, label: 'Detecting instruct', chapterId, chapterIndex: 1, totalChapters: 1 });
+    onPhase?.({
+      progress: 0.5,
+      label: 'Detecting instruct',
+      chapterId,
+      chapterIndex: 1,
+      totalChapters: 1,
+    });
     onAnnotation?.({ chapterId, annotations: [{ sentenceId: 1, instruct: 'warm' }] });
     await wait(300);
     onPhase?.({ progress: 1, label: 'Done' });
     return { annotatedChapters: 1, totalAnnotations: 1 };
   }
-  onPhase?.({ progress: 0.25, label: 'Detecting instruct', chapterId: 1, chapterIndex: 1, totalChapters: 2 });
+  onPhase?.({
+    progress: 0.25,
+    label: 'Detecting instruct',
+    chapterId: 1,
+    chapterIndex: 1,
+    totalChapters: 2,
+  });
   await wait(500);
   onAnnotation?.({
     chapterId: 1,
-    annotations: [{ sentenceId: 1, text: '[laughs]', instruct: 'warm, amused', vocalization: true }],
+    annotations: [
+      { sentenceId: 1, text: '[laughs]', instruct: 'warm, amused', vocalization: true },
+    ],
   });
   await wait(400);
   onPhase?.({
@@ -3309,7 +3395,17 @@ export class ReviewScriptError extends Error {
 
 async function realReviewScript(
   bookId: string,
-  { chapterId, model, signal, onPhase, onThrottle, onOps, onChapterFailed, onCheckpoint, onHeartbeat }: ReviewScriptOpts = {},
+  {
+    chapterId,
+    model,
+    signal,
+    onPhase,
+    onThrottle,
+    onOps,
+    onChapterFailed,
+    onCheckpoint,
+    onHeartbeat,
+  }: ReviewScriptOpts = {},
 ): Promise<ReviewScriptResult> {
   const body: Record<string, unknown> = {};
   if (chapterId !== undefined) body.chapterId = chapterId;
@@ -3354,7 +3450,10 @@ async function realReviewScript(
         break;
       case 'chapter-failed':
         if (typeof p.chapterId === 'number') {
-          onChapterFailed?.({ chapterId: p.chapterId, message: typeof p.message === 'string' ? p.message : 'Chapter review failed.' });
+          onChapterFailed?.({
+            chapterId: p.chapterId,
+            message: typeof p.message === 'string' ? p.message : 'Chapter review failed.',
+          });
         }
         break;
       case 'checkpoint':
@@ -3364,7 +3463,10 @@ async function realReviewScript(
         break;
       case 'heartbeat':
         if (typeof p.chapterIndex === 'number') {
-          onHeartbeat?.({ chapterId: p.chapterIndex, streaming: typeof p.receivedBytes === 'number' });
+          onHeartbeat?.({
+            chapterId: p.chapterIndex,
+            streaming: typeof p.receivedBytes === 'number',
+          });
         }
         break;
       case 'result':
@@ -3465,7 +3567,10 @@ export function _resetMockScriptReviewInFlight(): void {
   inFlightMockReviews.clear();
 }
 
-export async function mockReviewScript(bookId: string, opts: ReviewScriptOpts = {}): Promise<ReviewScriptResult> {
+export async function mockReviewScript(
+  bookId: string,
+  opts: ReviewScriptOpts = {},
+): Promise<ReviewScriptResult> {
   const existing = inFlightMockReviews.get(bookId);
   if (existing) {
     /* JOIN — replay what this caller missed, faithfully mirroring the real
@@ -3515,7 +3620,10 @@ export async function mockReviewScript(bookId: string, opts: ReviewScriptOpts = 
   }
 }
 
-async function runMockReviewTimeline(bookId: string, entry: InFlightMockReview): Promise<ReviewScriptResult> {
+async function runMockReviewTimeline(
+  bookId: string,
+  entry: InFlightMockReview,
+): Promise<ReviewScriptResult> {
   /* fs-58 follow-up (#1481) — a resumed reattach (mockAttachScriptReview after
      a reload) delegates back here with progress already recorded; without the
      alreadyAt guards below, resuming from 85% would restart the pill at 25%. A
@@ -3581,12 +3689,26 @@ async function runMockReviewTimeline(bookId: string, entry: InFlightMockReview):
   await wait(500);
   throwIfCancelled();
   if (alreadyAt < 0.5) {
-    notePhase({ progress: 0.5, label: 'Reviewing script', chapterId: 3, chapterIndex: 2, totalChapters: 3, estRemainingMs: 20_000 });
+    notePhase({
+      progress: 0.5,
+      label: 'Reviewing script',
+      chapterId: 3,
+      chapterIndex: 2,
+      totalChapters: 3,
+      estRemainingMs: 20_000,
+    });
   }
   await wait(500);
   throwIfCancelled();
   if (alreadyAt < 0.85) {
-    notePhase({ progress: 0.85, label: 'Reviewing script', chapterId: 3, chapterIndex: 3, totalChapters: 3, estRemainingMs: 5_000 });
+    notePhase({
+      progress: 0.85,
+      label: 'Reviewing script',
+      chapterId: 3,
+      chapterIndex: 3,
+      totalChapters: 3,
+      estRemainingMs: 5_000,
+    });
   }
   await wait(400);
   throwIfCancelled();
@@ -3598,7 +3720,12 @@ async function runMockReviewTimeline(bookId: string, entry: InFlightMockReview):
   /* validate_instruct: strip_tag + validate_instruct on ch1 sentence 1. */
   noteOps(1, [
     { id: 1, op: 'strip_tag', newText: 'x', rationale: 'tag' },
-    { id: 1, op: 'validate_instruct', newInstruct: 'a calm tone', rationale: 'contradicts the line' },
+    {
+      id: 1,
+      op: 'validate_instruct',
+      newInstruct: 'a calm tone',
+      rationale: 'contradicts the line',
+    },
   ]);
   noteCheckpoint(1, 1);
   /* Progressive emission (#1496): yield here so a concurrent attach lands with
@@ -3611,7 +3738,12 @@ async function runMockReviewTimeline(bookId: string, entry: InFlightMockReview):
   /* fs-58 Unit B: off-roster reattribute on ch3 sentence 3, flag_nonstory on
      ch3 sentence 15. Both default OFF in the diff modal. */
   noteOps(3, [
-    { id: 3, op: 'reattribute', proposed: { name: 'Ferra', gender: 'female' }, rationale: 'speaker not in cast' },
+    {
+      id: 3,
+      op: 'reattribute',
+      proposed: { name: 'Ferra', gender: 'female' },
+      rationale: 'speaker not in cast',
+    },
     { id: 15, op: 'flag_nonstory', rationale: 'page number artefact' },
   ]);
   noteCheckpoint(3, 2);
@@ -3639,7 +3771,13 @@ async function runMockReviewTimeline(bookId: string, entry: InFlightMockReview):
    notePhase (that would clobber the running.lastPhase.progress a reattach
    reads back), so a reload never sees this as the last-known phase. */
 function onPhaseLoadingTick(emitPhase: (p: SubstagePhaseEvent) => void): void {
-  emitPhase({ progress: 0, label: 'Loading model', activityState: 'loading', engine: 'local', model: 'qwen3.5:9b' });
+  emitPhase({
+    progress: 0,
+    label: 'Loading model',
+    activityState: 'loading',
+    engine: 'local',
+    model: 'qwen3.5:9b',
+  });
 }
 
 // Finding 3 (PR review round 5): sourced from the generated
@@ -3668,7 +3806,9 @@ export type ScriptReviewStateDTO =
   | { kind: 'ledger'; entries: Record<string, LedgerEntryDTO> };
 
 async function realGetScriptReviewState(bookId: string): Promise<ScriptReviewStateDTO> {
-  const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/script-review/state`, { method: 'GET' });
+  const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/script-review/state`, {
+    method: 'GET',
+  });
   if (!res.ok) throw new Error(`Failed to load script-review state (${res.status}).`);
   return res.json();
 }
@@ -3729,7 +3869,16 @@ async function realCancelScriptReview(bookId: string): Promise<CancelScriptRevie
    expected, handled outcome (design spec §4.2), not a failure. */
 async function realAttachScriptReview(
   bookId: string,
-  { chapterId, signal, onPhase, onThrottle, onOps, onChapterFailed, onCheckpoint, onHeartbeat }: ReviewScriptOpts = {},
+  {
+    chapterId,
+    signal,
+    onPhase,
+    onThrottle,
+    onOps,
+    onChapterFailed,
+    onCheckpoint,
+    onHeartbeat,
+  }: ReviewScriptOpts = {},
 ): Promise<ReviewScriptResult | null> {
   const body: Record<string, unknown> = {};
   if (chapterId !== undefined) body.chapterId = chapterId;
@@ -3773,7 +3922,10 @@ async function realAttachScriptReview(
         break;
       case 'chapter-failed':
         if (typeof p.chapterId === 'number') {
-          onChapterFailed?.({ chapterId: p.chapterId, message: typeof p.message === 'string' ? p.message : 'Chapter review failed.' });
+          onChapterFailed?.({
+            chapterId: p.chapterId,
+            message: typeof p.message === 'string' ? p.message : 'Chapter review failed.',
+          });
         }
         break;
       case 'checkpoint':
@@ -3783,7 +3935,10 @@ async function realAttachScriptReview(
         break;
       case 'heartbeat':
         if (typeof p.chapterIndex === 'number') {
-          onHeartbeat?.({ chapterId: p.chapterIndex, streaming: typeof p.receivedBytes === 'number' });
+          onHeartbeat?.({
+            chapterId: p.chapterIndex,
+            streaming: typeof p.receivedBytes === 'number',
+          });
         }
         break;
       case 'result':
@@ -3824,7 +3979,11 @@ async function realAttachScriptReview(
 export async function mockGetScriptReviewState(bookId: string): Promise<ScriptReviewStateDTO> {
   const state = readMockScriptReviewState(bookId);
   if (state.running) {
-    return { kind: 'running', running: [{ replay: { lastPhase: state.running.lastPhase } }], entries: state.entries };
+    return {
+      kind: 'running',
+      running: [{ replay: { lastPhase: state.running.lastPhase } }],
+      entries: state.entries,
+    };
   }
   return { kind: 'ledger', entries: state.entries };
 }
@@ -4789,7 +4948,9 @@ async function realLinkOrphanMatch(args: LinkOrphanMatchArgs): Promise<LinkOrpha
   return res.json();
 }
 
-export async function mockLinkOrphanMatch(args: LinkOrphanMatchArgs): Promise<LinkOrphanMatchResponse> {
+export async function mockLinkOrphanMatch(
+  args: LinkOrphanMatchArgs,
+): Promise<LinkOrphanMatchResponse> {
   await wait(80);
   /* Linking a pair clears any mock-tracked rejection for it too — mirrors
      the real server durably clearing the rejection (via the frontend's
@@ -6045,7 +6206,13 @@ export interface CastDesignCallbacks {
       srv-43: `voiceUuid` is present when the single-design SSE path emits it. */
   onCharacterDesigned?: (e: { characterId: string; voiceId: string; voiceUuid?: string }) => void;
   /** fe-32 — a designed emotion VARIANT was persisted (bulk job). */
-  onVariantDesigned?: (e: { characterId: string; emotion: Emotion; voiceId: string; viaFallback?: boolean; fallbackReason?: 'not-installed' | 'corrupt' }) => void;
+  onVariantDesigned?: (e: {
+    characterId: string;
+    emotion: Emotion;
+    voiceId: string;
+    viaFallback?: boolean;
+    fallbackReason?: 'not-installed' | 'corrupt';
+  }) => void;
   /** A character was skipped (already had a Qwen voice when its turn came). */
   onCharacterSkipped?: (e: { characterId: string }) => void;
   /** A character's design failed; the run continues past it. */
@@ -6166,7 +6333,9 @@ export async function readCastDesignStream(res: Response, cb: CastDesignCallback
             characterId: e.characterId ?? '',
             name: e.name ?? e.characterId ?? '',
             mode: e.mode,
-            phase: (DESIGN_PHASE_ORDER as string[]).includes(e.phase as string) ? e.phase! : 'designing',
+            phase: (DESIGN_PHASE_ORDER as string[]).includes(e.phase as string)
+              ? e.phase!
+              : 'designing',
           });
         } else {
           cb.onResumeFrom?.({
@@ -6507,7 +6676,13 @@ export interface ModelInventoryItem {
   sizeBytes: number | null;
   diskPath: string | null;
   loaded: boolean;
-  installState?: 'ready' | 'package-missing' | 'package-broken' | 'weights-missing' | 'not-installed' | 'loaded';
+  installState?:
+    | 'ready'
+    | 'package-missing'
+    | 'package-broken'
+    | 'weights-missing'
+    | 'not-installed'
+    | 'loaded';
   tier?: 'standard' | 'secondary';
   isDefaultEngine: boolean;
   isFallbackEngine: boolean;
@@ -6802,6 +6977,7 @@ const MOCK_USER_SETTINGS: UserSettings = {
      override this fixture (or getUserSettings) directly. */
   resolvedTtsModelKey: FRONTEND_ACCOUNT_DEFAULTS.defaultTtsModelKey,
   apiKeyStatus: 'unset',
+  openaiApiKeyStatus: 'unset',
   workspaceRoot: '(mock)/audiobook-workspace',
   workspaceSource: 'default',
   analyzerKeepAliveByModel: {},
@@ -6842,6 +7018,32 @@ async function realPutGeminiKey(key: string | null): Promise<UserSettings> {
   if (!res.ok)
     throw new Error(
       `Gemini key save failed (${res.status}): ${(await res.text()) || res.statusText}`,
+    );
+  return res.json();
+}
+
+async function realPutOpenAIKey(key: string | null): Promise<UserSettings> {
+  const res = await fetch('/api/user/settings/openai-key', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  });
+  if (!res.ok)
+    throw new Error(
+      `OpenAI-compatible key save failed (${res.status}): ${(await res.text()) || res.statusText}`,
+    );
+  return res.json();
+}
+
+export interface OpenAIModelsResponse {
+  models: string[];
+}
+
+async function realGetOpenAIModels(): Promise<OpenAIModelsResponse> {
+  const res = await fetch('/api/user/settings/openai-models');
+  if (!res.ok)
+    throw new Error(
+      `OpenAI-compatible model discovery failed (${res.status}): ${(await res.text()) || res.statusText}`,
     );
   return res.json();
 }
@@ -6977,7 +7179,11 @@ export function trimUnreleasedReleaseNotes(md: string, version: string): string 
   const running = toTuple(version);
   if (!running) return md;
   const atOrBelowRunning = (v: number[]) =>
-    v[0] !== running[0] ? v[0] < running[0] : v[1] !== running[1] ? v[1] < running[1] : v[2] <= running[2];
+    v[0] !== running[0]
+      ? v[0] < running[0]
+      : v[1] !== running[1]
+        ? v[1] < running[1]
+        : v[2] <= running[2];
   const lines = md.split(/\r?\n/);
   const start = lines.findIndex((l) => {
     /* H1 only, deliberately narrower than parseReleaseNotes' h1/h2 grammar:
@@ -7171,6 +7377,19 @@ async function mockPutGeminiKey(key: string | null): Promise<UserSettings> {
   };
   Object.assign(MOCK_USER_SETTINGS, next);
   return { ...MOCK_USER_SETTINGS };
+}
+
+async function mockPutOpenAIKey(key: string | null): Promise<UserSettings> {
+  await wait(50);
+  Object.assign(MOCK_USER_SETTINGS, {
+    openaiApiKeyStatus: key && key.trim().length > 0 ? 'set' : 'unset',
+  });
+  return { ...MOCK_USER_SETTINGS };
+}
+
+async function mockGetOpenAIModels(): Promise<OpenAIModelsResponse> {
+  await wait(50);
+  return { models: ['castwright', 'qwen3.5-27b'] };
 }
 
 async function mockPutUserSettings(patch: UserSettingsPatch): Promise<UserSettings> {
@@ -7384,10 +7603,17 @@ async function apiErrorFromResponse(res: Response, fallback: string): Promise<Ap
 
 async function realCreateDevicePairSession(body: { label: string; selfBind?: boolean }) {
   const res = await fetch('/api/devices/pair-session', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw await apiErrorFromResponse(res, `pair-session failed (${res.status})`);
-  return res.json() as Promise<{ url: string; code: string; expiresAt: number; friendlyUrl?: string }>;
+  return res.json() as Promise<{
+    url: string;
+    code: string;
+    expiresAt: number;
+    friendlyUrl?: string;
+  }>;
 }
 async function realListDevices() {
   const res = await fetch('/api/devices');
@@ -7437,19 +7663,20 @@ async function realGetLanCertStatus(): Promise<LanCertStatus> {
 }
 async function realRedeemBrowserPair(body: { code: string }) {
   const res = await fetch('/api/pair/redeem-browser', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new ApiError(`redeem failed (${res.status})`, res.status);
   return res.json() as Promise<{ label: string; expiresAt: string }>;
 }
 
-const mockCreateDevicePairSession = async (_b: { label: string; selfBind?: boolean }) =>
-  ({
-    url: `https://mock.local:8443/#/pair?c=MOCKCODEMOCKCODE`,
-    code: 'MOCKCODEMOCKCODE',
-    expiresAt: Date.now() + 300_000,
-    friendlyUrl: 'https://castwright.local/#/pair?c=MOCKCODEMOCKCODE',
-  });
+const mockCreateDevicePairSession = async (_b: { label: string; selfBind?: boolean }) => ({
+  url: `https://mock.local:8443/#/pair?c=MOCKCODEMOCKCODE`,
+  code: 'MOCKCODEMOCKCODE',
+  expiresAt: Date.now() + 300_000,
+  friendlyUrl: 'https://castwright.local/#/pair?c=MOCKCODEMOCKCODE',
+});
 const mockListDevices = async () => ({ devices: [] as PublicDevice[] });
 const mockRevokeDevice = async (_id: string) => ({ ok: true as const });
 const mockRegenerateLanCert = async () => ({
@@ -7465,8 +7692,10 @@ const mockGetLanCertStatus = async (): Promise<LanCertStatus> => ({
   uncoveredIps: [],
   expiresAt: null,
 });
-const mockRedeemBrowserPair = async (_b: { code: string }) =>
-  ({ label: 'This browser', expiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString() });
+const mockRedeemBrowserPair = async (_b: { code: string }) => ({
+  label: 'This browser',
+  expiresAt: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+});
 
 /* Plan 75 — portable book bundle (single .zip with state + manuscript +
    audio + cover + change-log for one book). The export returns the
@@ -7840,7 +8069,8 @@ async function realGetModelsStatus(): Promise<ModelsStatus> {
    the query param is gone. */
 
 function mockBlocker(status: 'pass' | 'warn' | 'fail'): BlockerDiagnosis {
-  if (status === 'pass') return { status: 'pass', cause: 'pass', message: 'Ready', remediation: '' };
+  if (status === 'pass')
+    return { status: 'pass', cause: 'pass', message: 'Ready', remediation: '' };
   if (status === 'warn')
     return {
       status: 'warn',
@@ -7848,7 +8078,12 @@ function mockBlocker(status: 'pass' | 'warn' | 'fail'): BlockerDiagnosis {
       message: 'Analyzer ready — no backup analyzer configured.',
       remediation: '',
     };
-  return { status: 'fail', cause: 'venv-missing', message: 'Not set up', remediation: 'Set it up.' };
+  return {
+    status: 'fail',
+    cause: 'venv-missing',
+    message: 'Not set up',
+    remediation: 'Set it up.',
+  };
 }
 
 /* The sidecar's venv-missing failure in the notReady branch below, copied
@@ -7893,7 +8128,12 @@ export async function mockGetSetupReadiness(): Promise<SetupReadiness> {
     : {
         ready: true,
         completedAt: '2026-06-12T00:00:00.000Z',
-        blockers: { sidecar: mockBlocker('pass'), ffmpeg: mockBlocker('pass'), tts: mockBlocker('pass'), analyzer: mockBlocker('pass') },
+        blockers: {
+          sidecar: mockBlocker('pass'),
+          ffmpeg: mockBlocker('pass'),
+          tts: mockBlocker('pass'),
+          analyzer: mockBlocker('pass'),
+        },
         info: { gpu: 'cuda · 1.2 / 8.0 GB reserved', vramTotalMb: 8192 },
       };
 }
@@ -8310,7 +8550,14 @@ async function mockGetOllamaHealth(): Promise<OllamaHealth> {
     modelPulled: true,
     resident: Array.from(MOCK_OLLAMA_RESIDENT),
     modelResident: MOCK_OLLAMA_RESIDENT.has('qwen3.5:4b'),
-    pullable: ['qwen3.5:4b', 'qwen3.5:9b', 'llama3.1:8b', 'llama3.2:3b', 'gemma3:4b', 'gemma-4-E4B-it-GGUF:UD-Q4_K_XL'],
+    pullable: [
+      'qwen3.5:4b',
+      'qwen3.5:9b',
+      'llama3.1:8b',
+      'llama3.2:3b',
+      'gemma3:4b',
+      'gemma-4-E4B-it-GGUF:UD-Q4_K_XL',
+    ],
   };
 }
 
@@ -8426,7 +8673,13 @@ function deriveMockConfigDefaults(): import('./types').ConfigValues {
   return Object.fromEntries(
     MOCK_CONFIG_DESCRIPTORS.map((d) => [
       d.key,
-      { key: d.key, effective: d.default, source: 'default' as const, locked: false, overridden: false },
+      {
+        key: d.key,
+        effective: d.default,
+        source: 'default' as const,
+        locked: false,
+        overridden: false,
+      },
     ]),
   );
 }
@@ -8544,10 +8797,10 @@ function mockAsrPairError(
   const supported = MOCK_CT2_SUPPORTED_COMPUTE_TYPES[family];
   if (supported.includes(computeType)) return null;
   return (
-    `qa.asr.device=${device} + qa.asr.computeType=${computeType} is an unsupported pair — `
-    + `${computeType} is not available on ${family === 'cuda' ? 'a cuda' : 'a cpu (or auto)'} device. `
-    + `Supported compute types here: ${supported.join(', ')} `
-    + `(or the sentinels: ${MOCK_ASR_COMPUTE_TYPE_SENTINELS.join(', ')}).`
+    `qa.asr.device=${device} + qa.asr.computeType=${computeType} is an unsupported pair — ` +
+    `${computeType} is not available on ${family === 'cuda' ? 'a cuda' : 'a cpu (or auto)'} device. ` +
+    `Supported compute types here: ${supported.join(', ')} ` +
+    `(or the sentinels: ${MOCK_ASR_COMPUTE_TYPE_SENTINELS.join(', ')}).`
   );
 }
 
@@ -8632,7 +8885,9 @@ export async function mockResetConfig(body: {
   // already in effect. Runs before anything is actually cleared below.
   const clearing = new Set(keysToReset);
   if (clearing.has('qa.asr.device') || clearing.has('qa.asr.computeType')) {
-    const resetOverrides: Partial<Record<'qa.asr.device' | 'qa.asr.computeType', number | boolean | string>> = {};
+    const resetOverrides: Partial<
+      Record<'qa.asr.device' | 'qa.asr.computeType', number | boolean | string>
+    > = {};
     for (const k of ['qa.asr.device', 'qa.asr.computeType'] as const) {
       if (clearing.has(k)) {
         const d = MOCK_CONFIG_DESCRIPTORS.find((x) => x.key === k);
@@ -8702,7 +8957,9 @@ export function _resetMockConfig(): void {
 async function realGetGpuDevices(): Promise<GpuDevicesResponse> {
   const res = await fetch('/api/gpu/devices');
   if (!res.ok)
-    throw new Error(`GPU device fetch failed (${res.status}): ${(await res.text()) || res.statusText}`);
+    throw new Error(
+      `GPU device fetch failed (${res.status}): ${(await res.text()) || res.statusText}`,
+    );
   return res.json();
 }
 
@@ -9004,14 +9261,11 @@ async function realPromoteLibraryRedesign(
   voiceUuid: string,
   body?: { persona?: string },
 ): Promise<VoiceLibraryEntry> {
-  const res = await fetch(
-    `/api/voice-library/${encodeURIComponent(voiceUuid)}/redesign/promote`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body ?? {}),
-    },
-  );
+  const res = await fetch(`/api/voice-library/${encodeURIComponent(voiceUuid)}/redesign/promote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
   if (!res.ok)
     throw new Error(
       `Voice library redesign promote failed (${res.status}): ${(await res.text()) || res.statusText}`,
@@ -9020,10 +9274,9 @@ async function realPromoteLibraryRedesign(
 }
 
 async function realDiscardLibraryRedesign(voiceUuid: string): Promise<VoiceLibraryEntry> {
-  const res = await fetch(
-    `/api/voice-library/${encodeURIComponent(voiceUuid)}/redesign/discard`,
-    { method: 'POST' },
-  );
+  const res = await fetch(`/api/voice-library/${encodeURIComponent(voiceUuid)}/redesign/discard`, {
+    method: 'POST',
+  });
   if (!res.ok)
     throw new Error(
       `Voice library redesign discard failed (${res.status}): ${(await res.text()) || res.statusText}`,
@@ -9111,9 +9364,7 @@ async function realSampleLibraryVoice(
 async function realCloneVoiceSample(form: FormData): Promise<CloneSampleCandidate> {
   const res = await fetch('/api/voice-library/clone-sample', { method: 'POST', body: form });
   if (!res.ok)
-    throw new Error(
-      `Clone sample failed (${res.status}): ${(await res.text()) || res.statusText}`,
-    );
+    throw new Error(`Clone sample failed (${res.status}): ${(await res.text()) || res.statusText}`);
   return res.json();
 }
 
@@ -9394,13 +9645,19 @@ export async function mockPromoteToLibrary(body: {
    arm below. */
 type MockCloneAssignBlock = 'failed' | 'no-clip' | 'no-transcript';
 
-const MOCK_CLONE_ENGINE_LABELS: Record<CloneEngineSlot, string> = { qwen: 'Qwen', coqui: 'Coqui XTTS v2' };
+const MOCK_CLONE_ENGINE_LABELS: Record<CloneEngineSlot, string> = {
+  qwen: 'Qwen',
+  coqui: 'Coqui XTTS v2',
+};
 
 function otherCloneEngineSlot(engine: CloneEngineSlot): CloneEngineSlot {
   return engine === 'qwen' ? 'coqui' : 'qwen';
 }
 
-function _mockClonedAssignBlock(entry: VoiceLibraryEntry, engine: CloneEngineSlot): MockCloneAssignBlock | null {
+function _mockClonedAssignBlock(
+  entry: VoiceLibraryEntry,
+  engine: CloneEngineSlot,
+): MockCloneAssignBlock | null {
   const slot = engine === 'coqui' ? entry.engines?.xtts : entry.engines?.qwen;
   if (slot?.status === 'failed') return 'failed';
   if (slot?.status === 'ready') return null;
@@ -9413,7 +9670,11 @@ function _mockClonedAssignBlock(entry: VoiceLibraryEntry, engine: CloneEngineSlo
  *  `blockMessage()` on the server, minus the character name (mock mode has
  *  no cast to read one from — see `mockAssignLibraryVoice`'s own doc
  *  comment for why). */
-function _mockBlockMessage(block: MockCloneAssignBlock, entry: VoiceLibraryEntry, engine: CloneEngineSlot): string {
+function _mockBlockMessage(
+  block: MockCloneAssignBlock,
+  entry: VoiceLibraryEntry,
+  engine: CloneEngineSlot,
+): string {
   const label = MOCK_CLONE_ENGINE_LABELS[engine];
   switch (block) {
     case 'failed':
@@ -9437,7 +9698,11 @@ function _mockBlockMessage(block: MockCloneAssignBlock, entry: VoiceLibraryEntry
 
 /** The 200 advisory (`warning` field) when the OTHER clone-capable engine
  *  is unusable — mirrors `advisoryMessage()` on the server. */
-function _mockAdvisoryMessage(block: MockCloneAssignBlock, entry: VoiceLibraryEntry, engine: CloneEngineSlot): string {
+function _mockAdvisoryMessage(
+  block: MockCloneAssignBlock,
+  entry: VoiceLibraryEntry,
+  engine: CloneEngineSlot,
+): string {
   const label = MOCK_CLONE_ENGINE_LABELS[engine];
   switch (block) {
     case 'failed':
@@ -9530,8 +9795,7 @@ export function _mockAssignGuardError(
    above. */
 export function _mockAssignWrittenSlots(entry: VoiceLibraryEntry): CloneEngineSlot[] {
   const coqui =
-    entry.provenance === 'cloned' ||
-    (entry.provenance === 'designed' && !!entry.engines?.xtts);
+    entry.provenance === 'cloned' || (entry.provenance === 'designed' && !!entry.engines?.xtts);
   return coqui ? ['qwen', 'coqui'] : ['qwen'];
 }
 
@@ -9638,7 +9902,8 @@ export async function mockCloneVoice(body: CloneVoiceBody): Promise<VoiceLibrary
      Without this guard, a missing consent would throw a raw TypeError here,
      diverging from the real path. */
   const consentDraft = body.consent as Record<string, unknown> | undefined;
-  const personName = typeof consentDraft?.personName === 'string' ? consentDraft.personName.trim() : '';
+  const personName =
+    typeof consentDraft?.personName === 'string' ? consentDraft.personName.trim() : '';
   const relationship = consentDraft?.relationship;
   const relationshipValid =
     relationship === 'self' ||
@@ -9728,6 +9993,8 @@ const real = {
   getUserSettings: realGetUserSettings,
   putUserSettings: realPutUserSettings,
   putGeminiKey: realPutGeminiKey,
+  putOpenAIKey: realPutOpenAIKey,
+  getOpenAIModels: realGetOpenAIModels,
   getAppInfo: realGetAppInfo,
   getUpdateStatus: realGetUpdateStatus,
   checkCompanionApk: realCheckCompanionApk,
@@ -10038,6 +10305,8 @@ const mock = {
   getUserSettings: mockGetUserSettings,
   putUserSettings: mockPutUserSettings,
   putGeminiKey: mockPutGeminiKey,
+  putOpenAIKey: mockPutOpenAIKey,
+  getOpenAIModels: mockGetOpenAIModels,
   getAppInfo: mockGetAppInfo,
   getUpdateStatus: mockGetUpdateStatus,
   checkCompanionApk: mockCheckCompanionApk,
@@ -10235,7 +10504,8 @@ const mock = {
     const audioSec = recentChapters.reduce((s, c) => s + c.audioSec, 0);
     const synthSec = recentChapters.reduce((s, c) => s + c.synthSec, 0);
     const spanHours =
-      (Date.parse(recentChapters[0].at) - Date.parse(recentChapters[recentChapters.length - 1].at)) /
+      (Date.parse(recentChapters[0].at) -
+        Date.parse(recentChapters[recentChapters.length - 1].at)) /
       3_600_000;
     return {
       chapters: recentChapters.length,
@@ -10294,10 +10564,18 @@ const mock = {
     const base = [29.4, 28.9, 27.4, 26.0, 25.3, 24.1];
     const records: AnalyzerEvalRecord[] = base.map((tps, i) => ({
       at: new Date(Date.now() - i * 60_000).toISOString(),
-      manuscriptId: 'mock-nd', bookTitle: 'Ночной дозор', model: 'qwen36-castwright:latest',
-      stage: i % 3 === 0 ? 'stage1-ch' : 'stage2-ch', chapterId: base.length - i,
-      evalTokS: tps, promptTokS: tps * 12, evalCount: 1800, loadMs: i === 4 ? 610 : 0,
-      subCalls: i % 3 === 0 ? 1 : 3, chunkCount: i % 3 === 0 ? null : 3, outcome: 'ok',
+      manuscriptId: 'mock-nd',
+      bookTitle: 'Ночной дозор',
+      model: 'qwen36-castwright:latest',
+      stage: i % 3 === 0 ? 'stage1-ch' : 'stage2-ch',
+      chapterId: base.length - i,
+      evalTokS: tps,
+      promptTokS: tps * 12,
+      evalCount: 1800,
+      loadMs: i === 4 ? 610 : 0,
+      subCalls: i % 3 === 0 ? 1 : 3,
+      chunkCount: i % 3 === 0 ? null : 3,
+      outcome: 'ok',
     }));
     return { records: limit != null ? records.slice(0, limit) : records };
   },

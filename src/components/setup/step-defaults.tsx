@@ -43,6 +43,7 @@ export function StepDefaults({ readiness: _readiness }: Props) {
      mount; empty (offline) falls back to the curated catalog. */
   const analysisModelGroups = buildModelOptionGroups(
     buildLocalModelOptions(account.localAnalyzerModels),
+    account.openaiAnalyzerModels ?? [],
   );
   useEffect(() => {
     void dispatch(fetchAnalyzerModels());
@@ -110,14 +111,17 @@ export function StepDefaults({ readiness: _readiness }: Props) {
       <h2 className="text-lg font-semibold text-ink">Defaults</h2>
 
       <p className="text-sm text-ink/60">
-        These defaults are used the first time you open a new book. You can change
-        them per-book later — this is just your starting point.
+        These defaults are used the first time you open a new book. You can change them per-book
+        later — this is just your starting point.
       </p>
 
       <div className="space-y-4">
         {/* Voice engine */}
         <div>
-          <label htmlFor="setup-defaults-engine" className="block text-sm font-medium text-ink mb-1">
+          <label
+            htmlFor="setup-defaults-engine"
+            className="block text-sm font-medium text-ink mb-1"
+          >
             Voice engine
           </label>
           <select
@@ -136,7 +140,10 @@ export function StepDefaults({ readiness: _readiness }: Props) {
 
         {/* TTS model (filtered to selected engine) */}
         <div>
-          <label htmlFor="setup-defaults-tts-model" className="block text-sm font-medium text-ink mb-1">
+          <label
+            htmlFor="setup-defaults-tts-model"
+            className="block text-sm font-medium text-ink mb-1"
+          >
             Voice model
           </label>
           <select
@@ -155,7 +162,10 @@ export function StepDefaults({ readiness: _readiness }: Props) {
 
         {/* Analysis model */}
         <div>
-          <label htmlFor="setup-defaults-analysis-model" className="block text-sm font-medium text-ink mb-1">
+          <label
+            htmlFor="setup-defaults-analysis-model"
+            className="block text-sm font-medium text-ink mb-1"
+          >
             Analysis model
           </label>
           <select

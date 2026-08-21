@@ -359,7 +359,12 @@ paths:
         - { in: query, name: author, required: true, schema: { type: string } }
         - { in: query, name: series, required: true, schema: { type: string } }
       responses:
-        '200': { description: Carried roster, content: { application/json: { schema: { $ref: '#/components/schemas/SeriesMemoryDetail' } } } }
+        '200':
+          {
+            description: Carried roster,
+            content:
+              { application/json: { schema: { $ref: '#/components/schemas/SeriesMemoryDetail' } } },
+          }
         '404': { description: Series below threshold or not found }
 
   /api/library/sync-manifest:
@@ -720,7 +725,7 @@ paths:
                   description: 'IDs of contiguous chapters to merge (≥ 2). Server rejects non-contiguous selections with 400.'
                 mergedTitle:
                   type: string
-                  description: 'Optional override for the merged chapter title. Defaults to the first member''s title.'
+                  description: "Optional override for the merged chapter title. Defaults to the first member's title."
       responses:
         '200':
           description: New chapter list + sentence remap table
@@ -1049,7 +1054,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ListenProgress' }
-        '400': { description: Body missing chapterId or currentSec, or contains non-numeric values, or contains a marker with an unrecognised kind }
+        '400':
+          {
+            description: Body missing chapterId or currentSec,
+            or contains non-numeric values,
+            or contains a marker with an unrecognised kind,
+          }
         '404': { description: Book not found }
 
   /api/books/{bookId}/shelf-status:
@@ -1355,7 +1365,15 @@ paths:
                   description: Start path — base-voice character ids to design (scope 'bases' or 'both'). Omit (with a bare body) to re-subscribe instead of starting.
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: Required on the start path.
                 scope:
                   type: string
@@ -1435,7 +1453,11 @@ paths:
                 required: [ok, cancelled]
                 properties:
                   ok: { type: boolean }
-                  cancelled: { type: boolean, description: True only if a live job was actually found and aborted. }
+                  cancelled:
+                    {
+                      type: boolean,
+                      description: True only if a live job was actually found and aborted.,
+                    }
 
   /api/books/{bookId}/cast/{characterId}/design-voice/stream:
     post:
@@ -1470,7 +1492,15 @@ paths:
                 sampleVoiceId: { type: string }
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                 preview:
                   type: boolean
                   default: false
@@ -1735,7 +1765,15 @@ paths:
               properties:
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: TTS model key. Local engines (kokoro-, coqui-) route to the sidecar; gemini-* keys route to Google's TTS API.
                 chapterIds:
                   type: array
@@ -1786,14 +1824,22 @@ paths:
                   description: The character whose segments in this chapter are re-mixed or re-recorded.
                 gainDb:
                   type: number
-                  description: 'remix only — signed dB gain applied to the character''s segments, clamped to [-24, +24].'
+                  description: "remix only — signed dB gain applied to the character's segments, clamped to [-24, +24]."
                 segmentIndices:
                   type: array
                   items: { type: integer }
-                  description: 'rerecord only — optional subset of the character''s segments to re-record; omitted = all of them.'
+                  description: "rerecord only — optional subset of the character's segments to re-record; omitted = all of them."
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: Required for rerecord — TTS model key to synthesise with.
       responses:
         '200':
@@ -1804,7 +1850,19 @@ paths:
                 type: object
                 description: 'A `data:` frame — one of splice_start / progress / chapter_assembling / warning / splice_complete / chapter_failed.'
                 properties:
-                  type: { type: string, enum: [splice_start, progress, chapter_assembling, warning, splice_complete, chapter_failed] }
+                  type:
+                    {
+                      type: string,
+                      enum:
+                        [
+                          splice_start,
+                          progress,
+                          chapter_assembling,
+                          warning,
+                          splice_complete,
+                          chapter_failed,
+                        ],
+                    }
                   chapterId: { type: integer }
                   characterId: { type: string }
                   mode: { type: string, enum: [remix, rerecord] }
@@ -1863,8 +1921,16 @@ paths:
                   description: 'When true (default) only scan and report `flagged`; no GPU, no write. False re-records the flagged sentences and re-splices.'
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
-                  description: 'Re-record only — TTS model key to re-synthesise with. Defaults to the chapter''s own rendered model when omitted.'
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
+                  description: "Re-record only — TTS model key to re-synthesise with. Defaults to the chapter's own rendered model when omitted."
                 maxRerecords:
                   type: integer
                   description: 'Re-record only — max re-synthesis attempts per flagged sentence, keeping the best take. Defaults to SEG_QA_MAX_RERECORDS (2).'
@@ -1877,7 +1943,20 @@ paths:
                 type: object
                 description: 'A `data:` frame — one of qa_scan / splice_start / progress / chapter_assembling / warning / qa_repair_complete / chapter_failed.'
                 properties:
-                  type: { type: string, enum: [qa_scan, splice_start, progress, chapter_assembling, warning, qa_repair_complete, chapter_failed] }
+                  type:
+                    {
+                      type: string,
+                      enum:
+                        [
+                          qa_scan,
+                          splice_start,
+                          progress,
+                          chapter_assembling,
+                          warning,
+                          qa_repair_complete,
+                          chapter_failed,
+                        ],
+                    }
                   chapterId: { type: integer }
                   dryRun: { type: boolean }
                   flaggedCount: { type: integer }
@@ -1891,8 +1970,18 @@ paths:
                         characterId: { type: string }
                         sentenceIds: { type: array, items: { type: integer } }
                         reasons: { type: array, items: { type: string } }
-                  repaired: { type: array, items: { type: integer }, description: Segment indices that passed QA after re-recording. }
-                  stillSuspect: { type: array, items: { type: integer }, description: Segment indices that stayed suspect after exhausting re-records. }
+                  repaired:
+                    {
+                      type: array,
+                      items: { type: integer },
+                      description: Segment indices that passed QA after re-recording.,
+                    }
+                  stillSuspect:
+                    {
+                      type: array,
+                      items: { type: integer },
+                      description: Segment indices that stayed suspect after exhausting re-records.,
+                    }
                   durationSec: { type: number }
                   segmentCount: { type: integer }
                   hasPreviousAudio: { type: boolean }
@@ -2351,7 +2440,15 @@ paths:
                 languageCode: { type: string }
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: The Qwen tier to design at (#1842). Must route to the qwen engine or the request 400s. Omitted defaults to qwen3-tts-0.6b.
       responses:
         '201':
@@ -2396,7 +2493,15 @@ paths:
                 persona: { type: string }
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: The Qwen tier to redesign at (#1842). Must route to the qwen engine or the request 400s. Omitted defaults to qwen3-tts-0.6b.
       responses:
         '200':
@@ -2500,7 +2605,15 @@ paths:
                 characterId: { type: string }
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: |
                     Optional — the model key this assign's caller actually intends to
                     render with (e.g. the profile drawer's PENDING engine-picker
@@ -2630,10 +2743,22 @@ paths:
             schema:
               type: object
               properties:
-                text: { type: string, description: Optional preview text. Omitted defaults to a built-in sample line for the entry's persona/name. }
+                text:
+                  {
+                    type: string,
+                    description: Optional preview text. Omitted defaults to a built-in sample line for the entry's persona/name.,
+                  }
                 modelKey:
                   type: string
-                  enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                  enum:
+                    [
+                      kokoro-v1,
+                      qwen3-tts-0.6b,
+                      qwen3-tts-1.7b,
+                      coqui-xtts-v2,
+                      gemini-2.5-flash,
+                      gemini-3.1-flash,
+                    ]
                   description: |
                     The tier/engine to preview at (#1842, widened fs-38 Wave 3c Task 27
                     to select the ENGINE too, not just the Qwen tier). Must route to a
@@ -2650,7 +2775,11 @@ paths:
                 required: [url]
                 properties:
                   url: { type: string }
-                  cached: { type: boolean, description: Whether this response served a previously-synthesised sample rather than synthesising a fresh one. }
+                  cached:
+                    {
+                      type: boolean,
+                      description: Whether this response served a previously-synthesised sample rather than synthesising a fresh one.,
+                    }
         '400':
           description: modelKey is present but does not route to a clone-capable engine (qwen or coqui)
           content:
@@ -3772,7 +3901,7 @@ paths:
                 properties:
                   ok:
                     type: boolean
-                    description: 'false when `version` did not match the ledger''s current version for this chapter — a stale, safely-ignored write.'
+                    description: "false when `version` did not match the ledger's current version for this chapter — a stale, safely-ignored write."
         '400':
           description: chapterId, version, and appliedOpKeys are required
         '404':
@@ -3817,7 +3946,7 @@ paths:
                 properties:
                   ok:
                     type: boolean
-                    description: 'false when `version` did not match the ledger''s current version for this chapter — a stale, safely-ignored write.'
+                    description: "false when `version` did not match the ledger's current version for this chapter — a stale, safely-ignored write."
         '400':
           description: chapterId, version, and selected are required
         '404':
@@ -3877,7 +4006,7 @@ paths:
                 chapterId:
                   {
                     type: integer,
-                    description: 'Optional chapter id — when present, attaches to that chapter''s single-chapter job only; when absent, attaches to the whole-book job.',
+                    description: "Optional chapter id — when present, attaches to that chapter's single-chapter job only; when absent, attaches to the whole-book job.",
                   }
       responses:
         '200':
@@ -3935,7 +4064,14 @@ paths:
                 audio: { type: string, format: binary }
                 captureMethod: { type: string, enum: [upload, record] }
       responses:
-        '202': { description: Candidate created, content: { application/json: { schema: { $ref: '#/components/schemas/CloneSampleCandidate' } } } }
+        '202':
+          {
+            description: Candidate created,
+            content:
+              {
+                application/json: { schema: { $ref: '#/components/schemas/CloneSampleCandidate' } },
+              },
+          }
         '400': { description: Bad or unusable audio }
         '404': { description: Voice library disabled }
         '413': { description: Upload exceeds the 25 MB sample size limit }
@@ -3949,8 +4085,18 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/CloneVoiceRequest' }
       responses:
-        '200': { description: Cloned voice created, content: { application/json: { schema: { $ref: '#/components/schemas/VoiceLibraryEntry' } } } }
-        '400': { description: Missing candidateId, a transcript longer than the CloneVoiceRequest transcript maxLength, or consent.attestedBy absent/blank for a non-self relationship }
+        '200':
+          {
+            description: Cloned voice created,
+            content:
+              { application/json: { schema: { $ref: '#/components/schemas/VoiceLibraryEntry' } } },
+          }
+        '400':
+          {
+            description: Missing candidateId,
+            a transcript longer than the CloneVoiceRequest transcript maxLength,
+            or consent.attestedBy absent/blank for a non-self relationship,
+          }
         '404': { description: No such candidate / voice library disabled }
         '409': { description: A clone for this candidate is already running }
         '422': { description: Consent is absent or structurally invalid }
@@ -4162,7 +4308,18 @@ components:
       properties:
         type:
           type: string
-          enum: [resume_from, idle, progress, heartbeat, character_skipped, character_designed, variant_designed, character_failed, error]
+          enum:
+            [
+              resume_from,
+              idle,
+              progress,
+              heartbeat,
+              character_skipped,
+              character_designed,
+              variant_designed,
+              character_failed,
+              error,
+            ]
           description: |
             `resume_from` is sent once, immediately, when re-subscribing to a
             LIVE job — carries `total`/`done`/`currentName` so the reload
@@ -4221,17 +4378,27 @@ components:
           type: string
           description: Present on progress, character_skipped (clone-protected variant only), and character_failed. Absent on character_designed itself (only its preceding progress event carries a name).
         emotion: { type: string, description: variant_designed only — the emotion just designed. }
-        voiceId: { type: string, description: 'character_designed / variant_designed only — the resulting qwen-<uuid> voice id.' }
-        viaFallback: { type: boolean, description: variant_designed only — true when the sidecar fell back off the instruct design path. }
+        voiceId:
+          {
+            type: string,
+            description: 'character_designed / variant_designed only — the resulting qwen-<uuid> voice id.',
+          }
+        viaFallback:
+          {
+            type: boolean,
+            description: variant_designed only — true when the sidecar fell back off the instruct design path.,
+          }
         fallbackReason: { type: string, description: variant_designed only, alongside viaFallback. }
         reason:
           type: string
           enum: [already_cloned]
           description: character_skipped only — present exactly when the skip is the clone-protection guard; absent for every other skip cause.
-        errorReason: { type: string, description: character_failed only — the per-character failure message. }
+        errorReason:
+          { type: string, description: character_failed only — the per-character failure message. }
         code:
           type: string
-          enum: [sidecar_unavailable, gpu_contention, unsupported_language, lock-contention, unknown]
+          enum:
+            [sidecar_unavailable, gpu_contention, unsupported_language, lock-contention, unknown]
           description: error only — machine-readable whole-run abort reason.
         message: { type: string, description: error only — human-readable abort message. }
 
@@ -4292,11 +4459,16 @@ components:
         mode: { type: string, enum: [first, redesign], description: resume_from only. }
         phase:
           type: string
-          enum: [freeing-vram, loading-model, designing, anchoring, performing, distilling, rendering]
+          enum:
+            [freeing-vram, loading-model, designing, anchoring, performing, distilling, rendering]
           description: Present on resume_from (current phase, for the reload banner) and on every `phase` event.
         previewVoiceId: { type: string, description: preview_ready only. }
         previewUrl: { type: string, description: preview_ready only. }
-        persona: { type: string, description: preview_ready only — the persona text the preview was designed from. }
+        persona:
+          {
+            type: string,
+            description: preview_ready only — the persona text the preview was designed from.,
+          }
         voiceUuid: { type: string, description: preview_ready / designed only. }
         voiceId: { type: string, description: designed only. }
         url: { type: string, description: designed only. }
@@ -4317,7 +4489,8 @@ components:
         mode: { type: string, enum: [first, redesign] }
         phase:
           type: string
-          enum: [freeing-vram, loading-model, designing, anchoring, performing, distilling, rendering]
+          enum:
+            [freeing-vram, loading-model, designing, anchoring, performing, distilling, rendering]
 
     # --- Script review persistence (fs-58) ---------------------------
     ScriptReviewLedgerEntry:
@@ -4449,7 +4622,15 @@ components:
             Used to filter the model dropdown's initial state.
         defaultTtsModelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             STORED TTS model key from src/lib/tts-models.ts — what the Account
             picker shows and round-trips. Default for new accounts is
@@ -4467,7 +4648,15 @@ components:
             unchanged.
         resolvedTtsModelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             READ-ONLY effective default after the Qwen-when-installed
             resolution: equals `defaultTtsModelKey` when the user made an
@@ -4501,6 +4690,10 @@ components:
             allowCloudFallback is on, AND the local daemon is unreachable).
             `gemini` always goes direct. The ANALYZER env no longer selects
             the engine. See server/src/analyzer/index.ts selectAnalyzer.
+        analyzerProvider:
+          type: string
+          enum: [ollama, openai, gemini]
+          description: User-facing analyzer provider selected in Model Manager.
         allowCloudFallback:
           type: boolean
           description: |
@@ -4519,6 +4712,17 @@ components:
             on every analysis request, like sidecarUrl. The Ollama *model*
             tag is not stored separately — `defaultAnalysisModel` doubles
             as the Ollama tag when it has Ollama shape (contains ':').
+        openaiBaseUrl:
+          type: string
+          description: OpenAI-compatible API root, for example http://host.docker.internal:5001/v1.
+        openaiModel:
+          type: string
+          description: Model id sent to the OpenAI-compatible Chat Completions endpoint.
+        openaiApiKeyStatus:
+          type: string
+          enum: [set, unset]
+          readOnly: true
+          description: Whether a bearer token is configured; the token itself is never returned.
         workspaceDirOverride:
           type: string
           nullable: true
@@ -4688,7 +4892,15 @@ components:
         defaultTtsEngine: { type: string, enum: [local, gemini] }
         defaultTtsModelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
         defaultTtsModelKeyExplicit:
           type: boolean
           description: |
@@ -4699,8 +4911,11 @@ components:
             defaultTtsModelKey.
         sidecarUrl: { type: string }
         analysisEngine: { type: string, enum: [local, gemini] }
+        analyzerProvider: { type: string, enum: [ollama, openai, gemini] }
         allowCloudFallback: { type: boolean }
         ollamaUrl: { type: string }
+        openaiBaseUrl: { type: string }
+        openaiModel: { type: string }
         workspaceDirOverride:
           type: string
           nullable: true
@@ -5066,7 +5281,17 @@ components:
         isStandalone: { type: boolean }
         status:
           type: string
-          enum: [not_analysed, analysing, cast_pending, voices_pending, generating, complete, unreadable, orphaned]
+          enum:
+            [
+              not_analysed,
+              analysing,
+              cast_pending,
+              voices_pending,
+              generating,
+              complete,
+              unreadable,
+              orphaned,
+            ]
         manuscriptId: { type: string }
         chapterCount: { type: integer }
         completedChapters: { type: integer }
@@ -5443,7 +5668,23 @@ components:
       properties:
         type:
           type: string
-          enum: [progress, chapter_assembling, chapter_verifying, chapter_recovering, chapter_preparing_voice, chapter_complete, chapter_failed, idle, resume_from, warning, chapter_awaiting_fallback_confirm, scoring_started, scoring_progress, scoring_complete]
+          enum:
+            [
+              progress,
+              chapter_assembling,
+              chapter_verifying,
+              chapter_recovering,
+              chapter_preparing_voice,
+              chapter_complete,
+              chapter_failed,
+              idle,
+              resume_from,
+              warning,
+              chapter_awaiting_fallback_confirm,
+              scoring_started,
+              scoring_progress,
+              scoring_complete,
+            ]
           description: |
             `chapter_assembling` is emitted between the last per-group synthesis
             tick and `chapter_complete`, while the server concatenates the PCM,
@@ -5552,7 +5793,15 @@ components:
             the next page reload.
         audioModelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             Only on `chapter_complete` — the TTS model key that produced
             this chapter's audio. Carries the engine forward so the
@@ -5668,7 +5917,15 @@ components:
           description: Required when scope === 'character'; null otherwise.
         modelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             Optional per-entry TTS model override (e.g. a regenerate that should
             run at the Qwen 1.7B quality tier instead of the session default).
@@ -5770,7 +6027,15 @@ components:
           description: Required when scope === 'character'.
         modelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             Optional per-entry TTS model override (e.g. a regenerate that should
             run at the Qwen 1.7B quality tier instead of the session default).
@@ -5803,7 +6068,15 @@ components:
       properties:
         modelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: UI-stable TTS model key. The engine prefix (kokoro-, coqui-, gemini-, qwen3-) drives provider selection server-side.
         voice:
           type: object
@@ -5881,7 +6154,15 @@ components:
         cached: { type: boolean }
         modelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
 
     # --- Voice library ---------------------------------------------
     TtsVoiceAssignment:
@@ -5945,17 +6226,17 @@ components:
         id:
           {
             type: string,
-            description: 'Stable id used to hash a TTS prebuilt voice. Defaults to character.voiceId or character.id. NOT globally unique across the whole workspace-wide voices array — a voiceId-less character (narrator, unknown-male, unknown-female) can share this bare id with an unrelated book''s same-slug character. Safe for same-book joins (see src/lib/voice-character-link.ts); use `familyKey` for anything that needs a globally-unique identity (React keys, cross-book selection, pin state).',
+            description: "Stable id used to hash a TTS prebuilt voice. Defaults to character.voiceId or character.id. NOT globally unique across the whole workspace-wide voices array — a voiceId-less character (narrator, unknown-male, unknown-female) can share this bare id with an unrelated book's same-slug character. Safe for same-book joins (see src/lib/voice-character-link.ts); use `familyKey` for anything that needs a globally-unique identity (React keys, cross-book selection, pin state).",
           }
         familyKey:
           {
             type: string,
-            description: 'Globally-unique key across the whole workspace-wide voices array: the explicit voiceId when the source character set one (deliberate cross-book reuse), else a book-scoped key so two unrelated books'' same-slug, voiceId-less characters (narrator/unknown-male/unknown-female) never collide. Use this for React list keys, cross-book multi-select, and the pin endpoint. Always present on a real server response; consumers should fall back to `id` when absent (e.g. an older/local test fixture).',
+            description: "Globally-unique key across the whole workspace-wide voices array: the explicit voiceId when the source character set one (deliberate cross-book reuse), else a book-scoped key so two unrelated books' same-slug, voiceId-less characters (narrator/unknown-male/unknown-female) never collide. Use this for React list keys, cross-book multi-select, and the pin endpoint. Always present on a real server response; consumers should fall back to `id` when absent (e.g. an older/local test fixture).",
           }
         voiceUuid:
           {
             type: string,
-            description: 'srv-43 — the designed voice''s immutable identity, copied from the source Character. Optional; absent for catalog voices and pre-srv-43 designs.',
+            description: "srv-43 — the designed voice's immutable identity, copied from the source Character. Optional; absent for catalog voices and pre-srv-43 designs.",
           }
         character: { type: string }
         bookTitle: { type: string }
@@ -6153,7 +6434,8 @@ components:
             heard, and it answers "why has my clone no language?".
     CloneSampleCandidate:
       type: object
-      required: [candidateId, transcript, durationSeconds, sampleRate, qualityWarnings, detectedLanguage]
+      required:
+        [candidateId, transcript, durationSeconds, sampleRate, qualityWarnings, detectedLanguage]
       properties:
         candidateId: { type: string }
         transcript: { type: string }
@@ -6230,7 +6512,8 @@ components:
       required: [candidateId, consent]
       properties:
         candidateId: { type: string }
-        name: { type: string, description: Optional display name; defaults to the consent personName }
+        name:
+          { type: string, description: Optional display name; defaults to the consent personName }
         transcript:
           type: string
           maxLength: 2000
@@ -6781,7 +7064,16 @@ components:
             `resolveCharacterEngine`.
         ttsModelKey:
           type: string
-          enum: [coqui-xtts-v2, piper-en-us-medium, kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              coqui-xtts-v2,
+              piper-en-us-medium,
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           nullable: true
           description: |
             Per-character model-key override for the Qwen engine (fs-56).
@@ -6806,7 +7098,7 @@ components:
             properties:
               name:
                 type: string
-                description: "Engine-specific speaker handle (designed voiceId for Qwen)."
+                description: 'Engine-specific speaker handle (designed voiceId for Qwen).'
               libraryUuid: { type: string }
               provenance: { type: string, enum: [designed, cloned, imported] }
               variants:
@@ -6961,7 +7253,15 @@ components:
           }
         audioModelKey:
           type: string
-          enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+          enum:
+            [
+              kokoro-v1,
+              qwen3-tts-0.6b,
+              qwen3-tts-1.7b,
+              coqui-xtts-v2,
+              gemini-2.5-flash,
+              gemini-3.1-flash,
+            ]
           description: |
             TTS model key that produced this chapter's existing audio
             file. Stamped at render time and backfilled from the
@@ -7087,7 +7387,15 @@ components:
               excluded: { type: boolean }
               audioModelKey:
                 type: string
-                enum: [kokoro-v1, qwen3-tts-0.6b, qwen3-tts-1.7b, coqui-xtts-v2, gemini-2.5-flash, gemini-3.1-flash]
+                enum:
+                  [
+                    kokoro-v1,
+                    qwen3-tts-0.6b,
+                    qwen3-tts-1.7b,
+                    coqui-xtts-v2,
+                    gemini-2.5-flash,
+                    gemini-3.1-flash,
+                  ]
               audioRenderedAt: { type: string, format: date-time }
               titleOverridden: { type: boolean }
         sentenceRemap:
@@ -7184,7 +7492,8 @@ components:
       properties:
         id: { type: string, description: 'Server-generated export id' }
         bookId: { type: string }
-        format: { type: string, enum: [mp3-zip, m4b, mp3-folder, aac-m4a-zip, opus-ogg-zip, captions] }
+        format:
+          { type: string, enum: [mp3-zip, m4b, mp3-folder, aac-m4a-zip, opus-ogg-zip, captions] }
         captionFileFormat: { type: string, enum: [srt, vtt], nullable: true }
         captionGranularity: { type: string, enum: [line, sentence, word], nullable: true }
         captionScope: { type: string, enum: [whole-book, per-chapter], nullable: true }
@@ -7274,13 +7583,17 @@ components:
         protocol:
           type: string
           enum: [http, https]
-          description: "Scheme of the URLs in `urls`. `https` when LAN_HTTPS=1 is set (mkcert-backed TLS for mobile/tablet LAN access), `http` otherwise."
+          description: 'Scheme of the URLs in `urls`. `https` when LAN_HTTPS=1 is set (mkcert-backed TLS for mobile/tablet LAN access), `http` otherwise.'
         urls:
           type: array
-          items: { type: string, description: "Reachable URL, e.g. 'http://192.168.1.42:8080' or 'https://192.168.1.42:8443'" }
+          items:
+            {
+              type: string,
+              description: "Reachable URL, e.g. 'http://192.168.1.42:8080' or 'https://192.168.1.42:8443'",
+            }
         token:
           type: string
-          description: "srv-20 — the shared-secret LAN token, present only when LAN_AUTH_TOKEN is configured. The companion pairing QR carries it so a device can authenticate to the otherwise-guarded /api surface."
+          description: 'srv-20 — the shared-secret LAN token, present only when LAN_AUTH_TOKEN is configured. The companion pairing QR carries it so a device can authenticate to the otherwise-guarded /api surface.'
         caFingerprint:
           type: string
           description: "srv-20 — the LAN CA's SHA-256 (X.509 fingerprint256), present only when the mkcert root CA is resolvable. A pairing client fetches /cert/root.crt, computes the same fingerprint, and pins only if it matches."
@@ -7288,18 +7601,24 @@ components:
     Device:
       type: object
       required: [id, label, createdAt, revoked]
-      description: "srv-33 — a paired companion device. Never carries token material (only the SHA-256 is persisted server-side)."
+      description: 'srv-33 — a paired companion device. Never carries token material (only the SHA-256 is persisted server-side).'
       properties:
-        id: { type: string, description: "Stable device id (used to revoke)." }
-        label: { type: string, description: "Human label, e.g. the phone name." }
+        id: { type: string, description: 'Stable device id (used to revoke).' }
+        label: { type: string, description: 'Human label, e.g. the phone name.' }
         createdAt: { type: string, format: date-time }
-        lastSeenAt: { type: string, format: date-time, description: "Optional; last time this device's token was accepted." }
-        revoked: { type: boolean, description: "True once revoked — the guard then rejects its token." }
+        lastSeenAt:
+          {
+            type: string,
+            format: date-time,
+            description: "Optional; last time this device's token was accepted.",
+          }
+        revoked:
+          { type: boolean, description: 'True once revoked — the guard then rejects its token.' }
 
     GpuQueueDevice:
       type: object
       required: [kind, index, label, totalMb, freeMb]
-      description: "One compute device as read from server/src/gpu/capacity-probe.ts (sidecar /capacity, or an nvidia-smi/rocm-smi fallback)."
+      description: 'One compute device as read from server/src/gpu/capacity-probe.ts (sidecar /capacity, or an nvidia-smi/rocm-smi fallback).'
       properties:
         kind: { type: string, enum: [cuda, rocm, mps, cpu] }
         index: { type: integer, minimum: 0 }
@@ -7318,12 +7637,13 @@ components:
         devices:
           type: array
           items: { $ref: '#/components/schemas/GpuQueueDevice' }
-          description: "Live per-device VRAM reading at response time."
+          description: 'Live per-device VRAM reading at response time.'
 
     # --- Live generation throughput (dev RTF pill) -----
     ChapterThroughputRecord:
       type: object
-      required: [chapterId, title, bookId, modelKey, rtf, rerecordRtf, verifyRtf, audioSec, synthSec, at]
+      required:
+        [chapterId, title, bookId, modelKey, rtf, rerecordRtf, verifyRtf, audioSec, synthSec, at]
       description: |
         One finished chapter's own throughput, for the history ring. `rtf` is
         `synthSec / audioSec` (< 1 = faster than realtime) or null when the
@@ -7337,7 +7657,12 @@ components:
         title: { type: string, nullable: true }
         bookId: { type: string, nullable: true }
         modelKey: { type: string, nullable: true }
-        rtf: { type: number, nullable: true, description: 'synth wall ÷ audio (< 1 = faster than realtime).' }
+        rtf:
+          {
+            type: number,
+            nullable: true,
+            description: 'synth wall ÷ audio (< 1 = faster than realtime).',
+          }
         rerecordRtf:
           type: number
           nullable: true
@@ -7348,11 +7673,31 @@ components:
           description: Always-on verify floor (transcribe + embed) ÷ audio; null for multi-worker runs.
         audioSec: { type: number, description: 'Audio duration in seconds.' }
         synthSec: { type: number, description: 'Synthesis (TTS wall) duration in seconds.' }
-        at: { type: string, format: date-time, description: 'ISO timestamp when the chapter finished rendering.' }
+        at:
+          {
+            type: string,
+            format: date-time,
+            description: 'ISO timestamp when the chapter finished rendering.',
+          }
 
     GenerationStatsResponse:
       type: object
-      required: [chapters, audioSec, synthSec, rtf, xRealtime, chaptersPerHour, last, updatedAt, liveBatchRtf, lastBatchRtf, batchesInWindow, batchUpdatedAt, recentChapters]
+      required:
+        [
+          chapters,
+          audioSec,
+          synthSec,
+          rtf,
+          xRealtime,
+          chaptersPerHour,
+          last,
+          updatedAt,
+          liveBatchRtf,
+          lastBatchRtf,
+          batchesInWindow,
+          batchUpdatedAt,
+          recentChapters,
+        ]
       description: |
         Live generation-throughput snapshot. Groups three time-windows:
         (1) per-chapter rolling window (lagging summary, updates when chapters finish),
@@ -7429,7 +7774,21 @@ components:
     ResourceTelemetryRecord:
       type: object
       required:
-        [at, bookId, bookTitle, chapterId, title, modelKey, rtf, rerecordRtf, audioSec, wallSec, vramReservedMb, vramTotalMb, committedHostMb]
+        [
+          at,
+          bookId,
+          bookTitle,
+          chapterId,
+          title,
+          modelKey,
+          rtf,
+          rerecordRtf,
+          audioSec,
+          wallSec,
+          vramReservedMb,
+          vramTotalMb,
+          committedHostMb,
+        ]
       description: |
         One per-chapter telemetry sample captured right after a chapter
         rendered: throughput (RTF, audio/wall seconds) + GPU and host-RAM
@@ -7438,14 +7797,24 @@ components:
       properties:
         at: { type: string, format: date-time }
         bookId: { type: string, nullable: true }
-        bookTitle: { type: string, nullable: true, description: 'Human-readable book title at render time (state.json title); null for legacy records written before this field or when the book title was unknown.' }
+        bookTitle:
+          {
+            type: string,
+            nullable: true,
+            description: 'Human-readable book title at render time (state.json title); null for legacy records written before this field or when the book title was unknown.',
+          }
         chapterId:
           oneOf:
             - type: integer
             - type: string
         title: { type: string, nullable: true }
         modelKey: { type: string, nullable: true }
-        rtf: { type: number, nullable: true, description: 'synth wall ÷ audio (< 1 = faster than realtime).' }
+        rtf:
+          {
+            type: number,
+            nullable: true,
+            description: 'synth wall ÷ audio (< 1 = faster than realtime).',
+          }
         rerecordRtf:
           type: number
           nullable: true
@@ -7850,7 +8219,18 @@ components:
         files (never a new persisted book-level aggregate). See
         `server/src/audio/qa-report.ts` (audio aggregation) and
         `server/src/routes/qa-report.ts` (composes with config drift).
-      required: [bookId, generatedAt, chaptersRendered, chaptersTotal, totalLines, acoustic, asr, voiceDrift, configDrift]
+      required:
+        [
+          bookId,
+          generatedAt,
+          chaptersRendered,
+          chaptersTotal,
+          totalLines,
+          acoustic,
+          asr,
+          voiceDrift,
+          configDrift,
+        ]
       properties:
         bookId: { type: string }
         generatedAt: { type: string, format: date-time }
@@ -7872,7 +8252,19 @@ components:
             linesFlaggedDrift: { type: integer }
         voiceDrift:
           type: object
-          required: [attribution, chaptersEligible, chaptersScored, chaptersEmbedFailed, charactersOnRoster, charactersChecked, charactersPending, mismatches, inconclusiveCount, uncheckedCharacterIds]
+          required:
+            [
+              attribution,
+              chaptersEligible,
+              chaptersScored,
+              chaptersEmbedFailed,
+              charactersOnRoster,
+              charactersChecked,
+              charactersPending,
+              mismatches,
+              inconclusiveCount,
+              uncheckedCharacterIds,
+            ]
           properties:
             attribution: { type: string, enum: [full, legacy-unattributed] }
             chaptersEligible: { type: integer }
@@ -8118,7 +8510,19 @@ components:
               carriedPresent: { type: integer }
     CarriedCharacter:
       type: object
-      required: [character, aliases, voiceId, voiceLabel, voiceKind, firstBookId, lastBookId, bookIndices, carriedFullSpan, totalLines]
+      required:
+        [
+          character,
+          aliases,
+          voiceId,
+          voiceLabel,
+          voiceKind,
+          firstBookId,
+          lastBookId,
+          bookIndices,
+          carriedFullSpan,
+          totalLines,
+        ]
       properties:
         character: { type: string }
         aliases: { type: array, items: { type: string } }
@@ -8167,17 +8571,43 @@ components:
         Terminal reason a setup blocker is in its current state. `pass` is the
         shared healthy value. Mirrors BlockerCause in
         server/src/routes/setup-readiness.ts — keep them in lockstep.
-      enum: [python-missing, venv-missing, venv-broken, supervisor-exhausted,
-             supervisor-tripped, unreachable-transient, unreachable-no-supervisor,
-             sidecar-blocked, no-engine-installed, weights-missing,
-             cannot-confirm-engine, package-broken, ffmpeg-missing,
-             ffprobe-missing, both-missing, ffmpeg-too-old, ollama-unreachable,
-             model-not-pulled, no-gemini-key, pass]
+      enum:
+        [
+          python-missing,
+          venv-missing,
+          venv-broken,
+          supervisor-exhausted,
+          supervisor-tripped,
+          unreachable-transient,
+          unreachable-no-supervisor,
+          sidecar-blocked,
+          no-engine-installed,
+          weights-missing,
+          cannot-confirm-engine,
+          package-broken,
+          ffmpeg-missing,
+          ffprobe-missing,
+          both-missing,
+          ffmpeg-too-old,
+          ollama-unreachable,
+          model-not-pulled,
+          no-gemini-key,
+          pass,
+        ]
 
     BlockerActionKind:
       type: string
-      enum: [venv-bootstrap, qwen-install, kokoro-install, coqui-install,
-             sidecar-restart, ollama-install, ollama-pull, navigate]
+      enum:
+        [
+          venv-bootstrap,
+          qwen-install,
+          kokoro-install,
+          coqui-install,
+          sidecar-restart,
+          ollama-install,
+          ollama-pull,
+          navigate,
+        ]
 
     BlockerAction:
       type: object
@@ -8189,7 +8619,7 @@ components:
         params:
           type: object
           additionalProperties: { type: string }
-          description: 'Extra data the action needs, e.g. `{ model: ''qwen3.5:9b'' }`.'
+          description: "Extra data the action needs, e.g. `{ model: 'qwen3.5:9b' }`."
         href:
           type: string
           description: For `navigate` only — an in-app hash route (e.g. `#/models`).

@@ -20,8 +20,11 @@ export const FRONTEND_ACCOUNT_DEFAULTS: Pick<
   | 'defaultTtsModelKey'
   | 'sidecarUrl'
   | 'analysisEngine'
+  | 'analyzerProvider'
   | 'allowCloudFallback'
   | 'ollamaUrl'
+  | 'openaiBaseUrl'
+  | 'openaiModel'
   | 'workspaceDirOverride'
   | 'minorCastMinLines'
   | 'coverPickerDefaultTab'
@@ -57,10 +60,13 @@ export const FRONTEND_ACCOUNT_DEFAULTS: Pick<
      opt-in via the Defaults step. Flip in lockstep with
      server/src/workspace/user-settings.ts DEFAULT_USER_SETTINGS. */
   analysisEngine: 'local',
+  analyzerProvider: 'ollama',
   /* Part 1 — cloud fallback ON by default (opt-out). Flip in lockstep with
      server/src/workspace/user-settings.ts DEFAULT_USER_SETTINGS. */
   allowCloudFallback: true,
   ollamaUrl: 'http://localhost:11434',
+  openaiBaseUrl: 'http://localhost:8000/v1',
+  openaiModel: 'castwright',
   workspaceDirOverride: null,
   minorCastMinLines: 3,
   /* Plan 40 — which CoverPicker tab opens first. `'search'` matches

@@ -103,12 +103,20 @@ export function ApiKeyPill({ status }: { status: 'set' | 'unset' }) {
    back from GET — that's by design. So the field renders as an empty input
    with placeholder when 'unset', and as a masked-eight-dot placeholder
    when 'set' (the user can type to overwrite, or hit Clear to wipe). */
-export function GeminiKeyField({
+function SecretKeyField({
   status,
   onSave,
+  label,
+  envVar,
+  emptyPlaceholder,
+  wiki,
 }: {
   status: 'set' | 'unset';
   onSave: (key: string | null) => Promise<unknown> | unknown;
+  label: string;
+  envVar: string;
+  emptyPlaceholder: string;
+  wiki?: React.ReactNode;
 }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<'save' | 'clear' | null>(null);
@@ -144,16 +152,15 @@ export function GeminiKeyField({
   };
 
   const placeholder =
-    status === 'set' ? '••••••••  (key on file — type to overwrite)' : 'Paste your Gemini API key';
+    status === 'set' ? '••••••••  (key on file — type to overwrite)' : emptyPlaceholder;
 
   return (
     <div className="block">
-      <span className="block text-sm font-medium text-ink">Gemini API key</span>
+      <span className="block text-sm font-medium text-ink">{label}</span>
       <span className="block text-xs text-ink/55 mt-0.5">
-        Stored plaintext in server/user-settings.json (gitignored). The env-var GEMINI_API_KEY still
-        wins when present (CI / power-user override).
+        Stored in the private user-settings file. The env-var {envVar} still wins when present.
       </span>
-      <WikiLink page={GEMINI_KEY_WIKI} label="Get a Gemini API key" className="mt-1 text-xs" />
+      {wiki}
       <div className="mt-2 flex items-center gap-2">
         <input
           type="password"
@@ -162,7 +169,7 @@ export function GeminiKeyField({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder={placeholder}
-          aria-label="Gemini API key"
+          aria-label={label}
           className="flex-1 px-3 py-2 rounded-xl border border-ink/15 bg-white text-sm text-ink focus:outline-hidden focus:ring-2 focus:ring-magenta/30"
         />
         <ApiKeyPill status={status} />
@@ -188,5 +195,36 @@ export function GeminiKeyField({
         {flash && <span className="text-xs text-magenta font-semibold">{flash}</span>}
       </div>
     </div>
+  );
+}
+
+export function GeminiKeyField(props: {
+  status: 'set' | 'unset';
+  onSave: (key: string | null) => Promise<unknown> | unknown;
+}) {
+  return (
+    <SecretKeyField
+      {...props}
+      label="Gemini API key"
+      envVar="GEMINI_API_KEY"
+      emptyPlaceholder="Paste your Gemini API key"
+      wiki={
+        <WikiLink page={GEMINI_KEY_WIKI} label="Get a Gemini API key" className="mt-1 text-xs" />
+      }
+    />
+  );
+}
+
+export function OpenAIKeyField(props: {
+  status: 'set' | 'unset';
+  onSave: (key: string | null) => Promise<unknown> | unknown;
+}) {
+  return (
+    <SecretKeyField
+      {...props}
+      label="OpenAI-compatible API key"
+      envVar="OPENAI_API_KEY"
+      emptyPlaceholder="Paste a bearer token (optional for local endpoints)"
+    />
   );
 }

@@ -22,6 +22,7 @@ import type {
 import { GeminiAnalyzer } from './gemini.js';
 import {
   OpenAICompatibleAnalyzer,
+  resolveOpenAICompatibleConfig,
   resolveOpenAICompatibleConfigFromEnv,
 } from './openai-compatible.js';
 import { OllamaAnalyzer, LocalUnreachableError, AnalysisAbortedError } from './ollama.js';
@@ -204,18 +205,22 @@ export function selectAnalyzer(opts: SelectAnalyzerOptions = {}): AnalyzerSelect
   /* Container/ops override. This check intentionally precedes model-shape,
      per-request and saved-engine inference: once the process declares an
      OpenAI-compatible provider, every analyzer phase uses that endpoint. */
-  const openAIConfig = resolveOpenAICompatibleConfigFromEnv();
+  const openAIEnvConfig = resolveOpenAICompatibleConfigFromEnv();
+  const openAIConfig = openAIEnvConfig.enabled ? openAIEnvConfig : resolveOpenAICompatibleConfig();
   if (openAIConfig.enabled) {
+    /* A process-level override is intentionally fixed. A provider selected in
+       the UI may use a per-run model chosen from the discovered list. */
+    const model = openAIEnvConfig.enabled ? openAIConfig.model : (opts.model ?? openAIConfig.model);
     return {
       analyzer: new OpenAICompatibleAnalyzer({
         baseUrl: openAIConfig.baseUrl,
-        model: openAIConfig.model,
+        model,
         apiKey: openAIConfig.apiKey,
       }),
       /* Keep the existing public remote/cloud envelope until the UI and
          OpenAPI grow a provider discriminator of their own. */
       engine: 'gemini',
-      model: openAIConfig.model,
+      model,
       fallbackModel: null,
     };
   }
@@ -364,12 +369,7 @@ export class FallbackAnalyzer implements Analyzer {
       if (err instanceof AnalysisAbortedError) throw err;
       if (err instanceof LocalUnreachableError) {
         call.onFallback?.({ reason: 'Ollama unreachable' });
-        return await this.fallback.runScriptReviewChapter(
-          manuscriptId,
-          chapterId,
-          promptMd,
-          call,
-        );
+        return await this.fallback.runScriptReviewChapter(manuscriptId, chapterId, promptMd, call);
       }
       throw err;
     }
@@ -400,11 +400,23 @@ export class FallbackAnalyzer implements Analyzer {
     call: StageCall,
   ): Promise<EscalationOutput | null> {
     try {
-      return await this.primary.runAttributionEscalation(manuscriptId, chapterId, windowIndex, prompt, call);
+      return await this.primary.runAttributionEscalation(
+        manuscriptId,
+        chapterId,
+        windowIndex,
+        prompt,
+        call,
+      );
     } catch (err) {
       if (err instanceof AnalysisAbortedError) throw err;
       if (err instanceof LocalUnreachableError) {
-        return await this.fallback.runAttributionEscalation(manuscriptId, chapterId, windowIndex, prompt, call);
+        return await this.fallback.runAttributionEscalation(
+          manuscriptId,
+          chapterId,
+          windowIndex,
+          prompt,
+          call,
+        );
       }
       throw err;
     }
@@ -421,7 +433,12 @@ export class FallbackAnalyzer implements Analyzer {
     } catch (err) {
       if (err instanceof AnalysisAbortedError) throw err;
       if (err instanceof LocalUnreachableError) {
-        return await this.fallback.runNonStoryClassification!(manuscriptId, chapterId, promptMd, call);
+        return await this.fallback.runNonStoryClassification!(
+          manuscriptId,
+          chapterId,
+          promptMd,
+          call,
+        );
       }
       throw err;
     }

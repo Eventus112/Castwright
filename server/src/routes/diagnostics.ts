@@ -17,16 +17,13 @@ import { probeOllamaHealth } from './ollama-health.js';
 import { readGpuQueueState } from './gpu-queue.js';
 import { probeFfmpeg } from '../diagnostics/ffmpeg.js';
 import { probeDiskSpace, DISK_WARN_GB, DISK_FAIL_GB } from '../diagnostics/disk.js';
-import {
-  getResolvedAnalysisEngine,
-  getResolvedGeminiApiKey,
-} from '../workspace/user-settings.js';
+import { getResolvedAnalysisEngine, getResolvedGeminiApiKey } from '../workspace/user-settings.js';
 import { WORKSPACE_ROOT } from '../workspace/paths.js';
 import { readinessSeverity } from '../tts/engine-presence.js';
 import { VOICE_ENGINES, type VoiceEngineId } from '../tts/voice-engine-registry.js';
 import type { EngineId } from '../tts/engine-health.js';
 import { classifyPackageFault } from '../tts/models-status.js';
-import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
+import { resolveOpenAICompatibleConfig } from '../analyzer/openai-compatible.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 export type CheckId = 'gpu' | 'sidecar' | 'asr' | 'analyzer' | 'gemini' | 'ffmpeg' | 'disk';
@@ -79,10 +76,13 @@ function fmtGb(mb: number | null | undefined): string {
 export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<DiagnosticsResponse> {
   /* Probe the sidecar once and reuse it for both the sidecar row AND the GPU
      row — the sidecar /health is where VRAM figures come from. */
-  const sidecar = await probeSidecarHealth().catch(
-    (e: Error) => ({ status: 'unreachable' as const, url: '', proxy: 'sidecar' as const, error: e.message }),
-  );
-  const openAI = resolveOpenAICompatibleConfigFromEnv();
+  const sidecar = await probeSidecarHealth().catch((e: Error) => ({
+    status: 'unreachable' as const,
+    url: '',
+    proxy: 'sidecar' as const,
+    error: e.message,
+  }));
+  const openAI = resolveOpenAICompatibleConfig();
   const engine = openAI.enabled ? null : getResolvedAnalysisEngine();
   /* Callers that only need a subset of checks (e.g. GET /api/setup/readiness,
      which re-derives its own ffmpeg/analyzer diagnosis from richer data than
@@ -97,63 +97,70 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
     body: () => Promise<DiagnosticsCheck> | DiagnosticsCheck;
   }[] = [
     // GPU / VRAM headroom — derived from the sidecar's torch CUDA figures.
-    { id: 'gpu', label: 'GPU / VRAM', body: async () => {
-      if (sidecar.status !== 'reachable') {
-        return {
-          id: 'gpu',
-          label: 'GPU / VRAM',
-          status: 'fail',
-          detail: 'sidecar unreachable — cannot read VRAM',
-        };
-      }
-      const device = sidecar.device ?? null;
-      const reserved = sidecar.vramReservedMb;
-      const total = sidecar.vramTotalMb;
-      /* CUDA presence is engine-independent: the sidecar reports vramTotalMb iff
+    {
+      id: 'gpu',
+      label: 'GPU / VRAM',
+      body: async () => {
+        if (sidecar.status !== 'reachable') {
+          return {
+            id: 'gpu',
+            label: 'GPU / VRAM',
+            status: 'fail',
+            detail: 'sidecar unreachable — cannot read VRAM',
+          };
+        }
+        const device = sidecar.device ?? null;
+        const reserved = sidecar.vramReservedMb;
+        const total = sidecar.vramTotalMb;
+        /* CUDA presence is engine-independent: the sidecar reports vramTotalMb iff
          torch.cuda.is_available() (see _cuda_vram_mb). Don't key off the `device`
          field alone — it only reflects the Coqui engine and only when Coqui is
          loaded, so a Qwen-only run (Coqui idle) reports device=null while the GPU
          is plainly in use. */
-      const cudaPresent = device === 'cuda' || total != null;
-      if (!cudaPresent) {
+        const cudaPresent = device === 'cuda' || total != null;
+        if (!cudaPresent) {
+          return {
+            id: 'gpu',
+            label: 'GPU / VRAM',
+            status: 'ok',
+            detail: device ? `device: ${device}` : 'CPU — no GPU detected',
+          };
+        }
+        const queue = await readGpuQueueState();
+        const ratio = reserved != null && total != null && total > 0 ? reserved / total : null;
+        const status: CheckStatus = ratio != null && ratio > 0.85 ? 'warn' : 'ok';
+        const detail =
+          `cuda · ${fmtGb(reserved)} / ${fmtGb(total)} GB reserved` +
+          (queue.queueDepth > 0 ? ` · ${queue.queueDepth} queued` : '');
         return {
           id: 'gpu',
           label: 'GPU / VRAM',
-          status: 'ok',
-          detail: device ? `device: ${device}` : 'CPU — no GPU detected',
+          status,
+          detail,
+          value: total != null ? `${fmtGb(reserved)}/${fmtGb(total)} GB` : null,
         };
-      }
-      const queue = await readGpuQueueState();
-      const ratio = reserved != null && total != null && total > 0 ? reserved / total : null;
-      const status: CheckStatus = ratio != null && ratio > 0.85 ? 'warn' : 'ok';
-      const detail =
-        `cuda · ${fmtGb(reserved)} / ${fmtGb(total)} GB reserved` +
-        (queue.queueDepth > 0 ? ` · ${queue.queueDepth} queued` : '');
-      return {
-        id: 'gpu',
-        label: 'GPU / VRAM',
-        status,
-        detail,
-        value: total != null ? `${fmtGb(reserved)}/${fmtGb(total)} GB` : null,
-      };
-    } },
+      },
+    },
 
     // Voice engine (TTS sidecar) reachability + resident models.
-    { id: 'sidecar', label: 'Voice engine', body: () => {
-      if (sidecar.status !== 'reachable') {
-        return {
-          id: 'sidecar',
-          label: 'Voice engine',
-          status: 'fail',
-          detail: sidecar.error || 'unreachable',
-        };
-      }
-      const resident: string[] = [];
-      if (sidecar.modelLoaded) resident.push('coqui');
-      if (sidecar.kokoroLoaded) resident.push('kokoro');
-      if (sidecar.qwenLoaded) resident.push('qwen');
+    {
+      id: 'sidecar',
+      label: 'Voice engine',
+      body: () => {
+        if (sidecar.status !== 'reachable') {
+          return {
+            id: 'sidecar',
+            label: 'Voice engine',
+            status: 'fail',
+            detail: sidecar.error || 'unreachable',
+          };
+        }
+        const resident: string[] = [];
+        if (sidecar.modelLoaded) resident.push('coqui');
+        if (sidecar.kokoroLoaded) resident.push('kokoro');
+        if (sidecar.qwenLoaded) resident.push('qwen');
 
-      /* Check the standard TTS engines for a sidecar-confirmed unusable
+        /* Check the standard TTS engines for a sidecar-confirmed unusable
          package. #1965 — this reads the voice-engine registry's live accessors
          rather than `sidecar.<engine>PackageInstalled` directly, so it inherits
          the real-import signal (`*_import_ok`) exactly like models-status does.
@@ -164,11 +171,11 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
          requirements/nvidia-cuda.txt:4 and amd-rocm.txt:7, "install it from the
          Model Manager" — so including it would fire this row on every install
          that quite deliberately never installed Coqui. */
-      const STANDARD_TTS: { engine: EngineId & VoiceEngineId; name: string }[] = [
-        { engine: 'kokoro', name: 'Kokoro' },
-        { engine: 'qwen', name: 'Qwen' },
-      ];
-      /* Two distinct faults, and the copy must not conflate them (the old
+        const STANDARD_TTS: { engine: EngineId & VoiceEngineId; name: string }[] = [
+          { engine: 'kokoro', name: 'Kokoro' },
+          { engine: 'qwen', name: 'Qwen' },
+        ];
+        /* Two distinct faults, and the copy must not conflate them (the old
          string said "not importable" for what the filter actually detected,
          which was a MISSING package):
            - find_spec says false → the package is simply not installed.
@@ -184,195 +191,233 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
          "missing" points at installing it; "will not import" keeps pointing
          at Model Manager repair — "repair" is the wrong verb for a package
          that was never installed. */
-      const broken = STANDARD_TTS.flatMap((e) => {
-        const entry = VOICE_ENGINES.find((v) => v.id === e.engine);
-        if (!entry) return [];
-        const fault = classifyPackageFault(entry.liveImportOk(sidecar), entry.liveSpecPresent(sidecar));
-        if (fault === 'missing') {
-          return [{ ...e, phrase: `${e.name} package missing — install in Model Manager` }];
+        const broken = STANDARD_TTS.flatMap((e) => {
+          const entry = VOICE_ENGINES.find((v) => v.id === e.engine);
+          if (!entry) return [];
+          const fault = classifyPackageFault(
+            entry.liveImportOk(sidecar),
+            entry.liveSpecPresent(sidecar),
+          );
+          if (fault === 'missing') {
+            return [{ ...e, phrase: `${e.name} package missing — install in Model Manager` }];
+          }
+          if (fault === 'broken') {
+            return [
+              { ...e, phrase: `${e.name} package will not import — repair in Model Manager` },
+            ];
+          }
+          return [];
+        });
+        if (broken.length > 0) {
+          const sev: CheckStatus = broken
+            .map((e) =>
+              readinessSeverity({
+                engine: e.engine,
+                state: 'package-missing',
+                sidecarConfirmed: true,
+              }),
+            )
+            .includes('block')
+            ? 'fail'
+            : 'warn';
+          return {
+            id: 'sidecar',
+            label: 'Voice engine',
+            status: sev,
+            detail: `reachable · ${broken.map((e) => e.phrase).join(', ')}`,
+            value: resident.join(', ') || null,
+          };
         }
-        if (fault === 'broken') {
-          return [{ ...e, phrase: `${e.name} package will not import — repair in Model Manager` }];
-        }
-        return [];
-      });
-      if (broken.length > 0) {
-        const sev: CheckStatus = broken
-          .map((e) =>
-            readinessSeverity({ engine: e.engine, state: 'package-missing', sidecarConfirmed: true }),
-          )
-          .includes('block')
-          ? 'fail'
-          : 'warn';
+
         return {
           id: 'sidecar',
           label: 'Voice engine',
-          status: sev,
-          detail: `reachable · ${broken.map((e) => e.phrase).join(', ')}`,
+          status: 'ok',
+          detail: resident.length
+            ? `reachable · ${resident.join(', ')}`
+            : 'reachable · no model resident',
           value: resident.join(', ') || null,
         };
-      }
-
-      return {
-        id: 'sidecar',
-        label: 'Voice engine',
-        status: 'ok',
-        detail: resident.length ? `reachable · ${resident.join(', ')}` : 'reachable · no model resident',
-        value: resident.join(', ') || null,
-      };
-    } },
+      },
+    },
 
     // ASR (Whisper) content-QA engine (srv-31). Display-only — it loads lazily
     // on /transcribe and idle-evicts, so there's no Load/Stop here. OFF unless
     // SEG_ASR_ENABLED, in which case we surface whether it's resident + device.
     // Never a `fail` row: an idle (not-yet-loaded) ASR is the normal state.
-    { id: 'asr', label: 'ASR (Whisper)', body: () => {
-      if (sidecar.status !== 'reachable') {
-        return {
-          id: 'asr',
-          label: 'ASR (Whisper)',
-          status: 'fail',
-          detail: 'voice engine unreachable — cannot read ASR state',
-        };
-      }
-      if (!sidecar.asrEnabled) {
+    {
+      id: 'asr',
+      label: 'ASR (Whisper)',
+      body: () => {
+        if (sidecar.status !== 'reachable') {
+          return {
+            id: 'asr',
+            label: 'ASR (Whisper)',
+            status: 'fail',
+            detail: 'voice engine unreachable — cannot read ASR state',
+          };
+        }
+        if (!sidecar.asrEnabled) {
+          return {
+            id: 'asr',
+            label: 'ASR (Whisper)',
+            status: 'ok',
+            detail: 'off — content-QA disabled',
+          };
+        }
+        const device = sidecar.asrDevice ?? 'cpu';
         return {
           id: 'asr',
           label: 'ASR (Whisper)',
           status: 'ok',
-          detail: 'off — content-QA disabled',
+          detail: sidecar.asrLoaded
+            ? `enabled · resident · ${device}`
+            : `enabled · idle · ${device}`,
+          value: sidecar.asrLoaded ? device : null,
         };
-      }
-      const device = sidecar.asrDevice ?? 'cpu';
-      return {
-        id: 'asr',
-        label: 'ASR (Whisper)',
-        status: 'ok',
-        detail: sidecar.asrLoaded
-          ? `enabled · resident · ${device}`
-          : `enabled · idle · ${device}`,
-        value: sidecar.asrLoaded ? device : null,
-      };
-    } },
+      },
+    },
 
     // Analyzer connectivity/configuration. Ollama is probed only when the
     // saved local engine is effective; provider overrides and Gemini do not
     // depend on the local daemon.
-    { id: 'analyzer', label: 'Analyzer (Ollama)', body: async () => {
-      if (openAI.enabled) {
-        return {
-          id: 'analyzer',
-          label: 'Analyzer (OpenAI-compatible)',
-          status: 'ok',
-          detail: `configured · model "${openAI.model}"`,
-          value: openAI.model,
-        };
-      }
-      if (engine !== 'local') {
+    {
+      id: 'analyzer',
+      label: 'Analyzer (Ollama)',
+      body: async () => {
+        if (openAI.enabled) {
+          return {
+            id: 'analyzer',
+            label: 'Analyzer (OpenAI-compatible)',
+            status: 'ok',
+            detail: `configured · model "${openAI.model}"`,
+            value: openAI.model,
+          };
+        }
+        if (engine !== 'local') {
+          return {
+            id: 'analyzer',
+            label: 'Analyzer (Ollama)',
+            status: 'ok',
+            detail: `not in use (engine: ${engine})`,
+          };
+        }
+        const ollama = await probeOllamaHealth();
+        if (ollama.status !== 'reachable') {
+          return {
+            id: 'analyzer',
+            label: 'Analyzer (Ollama)',
+            status: 'fail',
+            detail: ollama.error || 'unreachable',
+          };
+        }
+        if (!ollama.modelPulled) {
+          return {
+            id: 'analyzer',
+            label: 'Analyzer (Ollama)',
+            status: 'warn',
+            detail: `reachable · model "${ollama.expectedModel}" not pulled`,
+          };
+        }
         return {
           id: 'analyzer',
           label: 'Analyzer (Ollama)',
           status: 'ok',
-          detail: `not in use (engine: ${engine})`,
+          detail: ollama.modelResident
+            ? `reachable · ${ollama.expectedModel} resident`
+            : `reachable · ${ollama.expectedModel} pulled`,
+          value: ollama.expectedModel ?? null,
         };
-      }
-      const ollama = await probeOllamaHealth();
-      if (ollama.status !== 'reachable') {
-        return {
-          id: 'analyzer',
-          label: 'Analyzer (Ollama)',
-          status: 'fail',
-          detail: ollama.error || 'unreachable',
-        };
-      }
-      if (!ollama.modelPulled) {
-        return {
-          id: 'analyzer',
-          label: 'Analyzer (Ollama)',
-          status: 'warn',
-          detail: `reachable · model "${ollama.expectedModel}" not pulled`,
-        };
-      }
-      return {
-        id: 'analyzer',
-        label: 'Analyzer (Ollama)',
-        status: 'ok',
-        detail: ollama.modelResident
-          ? `reachable · ${ollama.expectedModel} resident`
-          : `reachable · ${ollama.expectedModel} pulled`,
-        value: ollama.expectedModel ?? null,
-      };
-    } },
+      },
+    },
 
     // Gemini config presence (no live call) — only fails when Gemini is the
     // selected engine but no key is configured.
-    { id: 'gemini', label: 'Analyzer (Gemini)', body: () => {
-      if (openAI.enabled) {
-        return {
-          id: 'gemini',
-          label: 'Analyzer (Gemini)',
-          status: 'ok',
-          detail: 'not in use (provider: openai)',
-        };
-      }
-      const hasKey = getResolvedGeminiApiKey() != null;
-      if (engine !== 'gemini') {
-        return {
-          id: 'gemini',
-          label: 'Analyzer (Gemini)',
-          status: 'ok',
-          detail: hasKey ? 'not in use · API key configured' : 'not in use',
-        };
-      }
-      return hasKey
-        ? { id: 'gemini', label: 'Analyzer (Gemini)', status: 'ok', detail: 'API key configured' }
-        : {
+    {
+      id: 'gemini',
+      label: 'Analyzer (Gemini)',
+      body: () => {
+        if (openAI.enabled) {
+          return {
             id: 'gemini',
             label: 'Analyzer (Gemini)',
-            status: 'fail',
-            detail: 'GEMINI_API_KEY not set',
+            status: 'ok',
+            detail: 'not in use (provider: openai)',
           };
-    } },
+        }
+        const hasKey = getResolvedGeminiApiKey() != null;
+        if (engine !== 'gemini') {
+          return {
+            id: 'gemini',
+            label: 'Analyzer (Gemini)',
+            status: 'ok',
+            detail: hasKey ? 'not in use · API key configured' : 'not in use',
+          };
+        }
+        return hasKey
+          ? { id: 'gemini', label: 'Analyzer (Gemini)', status: 'ok', detail: 'API key configured' }
+          : {
+              id: 'gemini',
+              label: 'Analyzer (Gemini)',
+              status: 'fail',
+              detail: 'GEMINI_API_KEY not set',
+            };
+      },
+    },
 
     // ffmpeg + ffprobe presence on PATH.
-    { id: 'ffmpeg', label: 'ffmpeg / ffprobe', body: () => {
-      const { ffmpeg, ffprobe, version, belowFloor, minimum } = probeFfmpeg();
-      if (ffmpeg && ffprobe) {
-        /* ops-35: surface the version — the audio path parses ffmpeg's
+    {
+      id: 'ffmpeg',
+      label: 'ffmpeg / ffprobe',
+      body: () => {
+        const { ffmpeg, ffprobe, version, belowFloor, minimum } = probeFfmpeg();
+        if (ffmpeg && ffprobe) {
+          /* ops-35: surface the version — the audio path parses ffmpeg's
            loudnorm output, so "which ffmpeg" is a support question we get
            asked. Below the floor warns rather than fails: untested, not
            broken. */
-        const detail = version ? `both present · ffmpeg ${version}` : 'both present';
-        if (belowFloor) {
-          return {
-            id: 'ffmpeg',
-            label: 'ffmpeg / ffprobe',
-            status: 'warn',
-            detail: `${detail} — older than the supported ${minimum}+`,
-          };
+          const detail = version ? `both present · ffmpeg ${version}` : 'both present';
+          if (belowFloor) {
+            return {
+              id: 'ffmpeg',
+              label: 'ffmpeg / ffprobe',
+              status: 'warn',
+              detail: `${detail} — older than the supported ${minimum}+`,
+            };
+          }
+          return { id: 'ffmpeg', label: 'ffmpeg / ffprobe', status: 'ok', detail };
         }
-        return { id: 'ffmpeg', label: 'ffmpeg / ffprobe', status: 'ok', detail };
-      }
-      const missing = [!ffmpeg && 'ffmpeg', !ffprobe && 'ffprobe'].filter(Boolean).join(' + ');
-      return {
-        id: 'ffmpeg',
-        label: 'ffmpeg / ffprobe',
-        status: 'fail',
-        detail: `${missing} not found on PATH`,
-      };
-    } },
+        const missing = [!ffmpeg && 'ffmpeg', !ffprobe && 'ffprobe'].filter(Boolean).join(' + ');
+        return {
+          id: 'ffmpeg',
+          label: 'ffmpeg / ffprobe',
+          status: 'fail',
+          detail: `${missing} not found on PATH`,
+        };
+      },
+    },
 
     // Free disk on the workspace volume.
-    { id: 'disk', label: 'Free disk', body: async () => {
-      const probe = await probeDiskSpace(WORKSPACE_ROOT);
-      const detail =
-        probe.status === 'fail'
-          ? `${probe.freeGb} GB free — below ${DISK_FAIL_GB} GB`
-          : probe.status === 'warn'
-            ? `${probe.freeGb} GB free — below ${DISK_WARN_GB} GB`
-            : `${probe.freeGb} GB free`;
-      return { id: 'disk', label: 'Free disk', status: probe.status, detail, value: probe.freeGb };
-    } },
+    {
+      id: 'disk',
+      label: 'Free disk',
+      body: async () => {
+        const probe = await probeDiskSpace(WORKSPACE_ROOT);
+        const detail =
+          probe.status === 'fail'
+            ? `${probe.freeGb} GB free — below ${DISK_FAIL_GB} GB`
+            : probe.status === 'warn'
+              ? `${probe.freeGb} GB free — below ${DISK_WARN_GB} GB`
+              : `${probe.freeGb} GB free`;
+        return {
+          id: 'disk',
+          label: 'Free disk',
+          status: probe.status,
+          detail,
+          value: probe.freeGb,
+        };
+      },
+    },
   ];
 
   const checks = await Promise.all(

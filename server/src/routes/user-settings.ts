@@ -21,18 +21,24 @@ import {
   readUserSettings,
   writeUserSettings,
   writeGeminiApiKey,
+  writeOpenAIApiKey,
   getResolvedGeminiApiKey,
+  getResolvedOpenAIApiKey,
   getResolvedGenerationWorkers,
   getResolvedTtsModelKey,
   type UserSettings,
 } from '../workspace/user-settings.js';
 import { WORKSPACE_ROOT, WORKSPACE_SOURCE } from '../workspace/paths.js';
-import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
+import {
+  normaliseOpenAIModelsUrl,
+  resolveOpenAICompatibleConfig,
+} from '../analyzer/openai-compatible.js';
 
 export const userSettingsRouter = Router();
 
-interface UserSettingsResponse extends Omit<UserSettings, 'geminiApiKey'> {
+interface UserSettingsResponse extends Omit<UserSettings, 'geminiApiKey' | 'openaiApiKey'> {
   apiKeyStatus: 'set' | 'unset';
+  openaiApiKeyStatus: 'set' | 'unset';
   workspaceRoot: string;
   workspaceSource: 'env' | 'default' | 'override';
   /* The EFFECTIVE default TTS model after the Qwen-when-installed resolution
@@ -51,10 +57,12 @@ function envDerived(settings: UserSettings): UserSettingsResponse {
   /* Drop the plaintext key — frontend only ever sees apiKeyStatus. */
   const rest = { ...settings } as Partial<UserSettings>;
   delete rest.geminiApiKey;
-  const openAI = resolveOpenAICompatibleConfigFromEnv();
+  delete rest.openaiApiKey;
+  const openAI = resolveOpenAICompatibleConfig();
   return {
-    ...(rest as Omit<UserSettings, 'geminiApiKey'>),
+    ...(rest as Omit<UserSettings, 'geminiApiKey' | 'openaiApiKey'>),
     apiKeyStatus: getResolvedGeminiApiKey() ? 'set' : 'unset',
+    openaiApiKeyStatus: getResolvedOpenAIApiKey() ? 'set' : 'unset',
     /* Surface the ENV-resolved worker count (GEN_WORKERS env > account setting >
        default 2), mirroring apiKeyStatus. The client queue-dispatcher reads
        `account.generationWorkers` from this response, so without this overlay
@@ -123,6 +131,53 @@ userSettingsRouter.put('/gemini-key', async (req: Request, res: Response) => {
     }
     console.error('[user-settings] PUT /gemini-key failed', err);
     res.status(500).json({ error: 'Failed to save Gemini API key.' });
+  }
+});
+
+userSettingsRouter.put('/openai-key', async (req: Request, res: Response) => {
+  try {
+    const { key } = geminiKeyPayloadSchema.parse(req.body);
+    const updated = await writeOpenAIApiKey(key);
+    res.json(envDerived(updated));
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid payload.', issues: err.issues });
+    }
+    console.error('[user-settings] PUT /openai-key failed', err);
+    res.status(500).json({ error: 'Failed to save OpenAI-compatible API key.' });
+  }
+});
+
+/* Discover models from the currently configured OpenAI-compatible endpoint.
+   The browser never supplies a URL, preventing this route from becoming an
+   arbitrary SSRF proxy; it only probes the validated, server-saved setting. */
+userSettingsRouter.get('/openai-models', async (_req: Request, res: Response) => {
+  try {
+    const config = resolveOpenAICompatibleConfig();
+    if (!config.enabled) {
+      return res
+        .status(409)
+        .json({ error: 'Select OpenAI-compatible as the analyzer provider first.' });
+    }
+    const response = await fetch(normaliseOpenAIModelsUrl(config.baseUrl), {
+      headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 1000);
+      return res
+        .status(502)
+        .json({ error: `Model discovery failed: HTTP ${response.status}`, detail });
+    }
+    const body = (await response.json()) as { data?: Array<{ id?: unknown }> };
+    const models = Array.isArray(body.data)
+      ? body.data
+          .map((item) => item?.id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    res.json({ models });
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message || 'Model discovery failed.' });
   }
 });
 

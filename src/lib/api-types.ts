@@ -3264,6 +3264,11 @@ export interface components {
              */
             analysisEngine: "local" | "gemini";
             /**
+             * @description User-facing analyzer provider selected in Model Manager.
+             * @enum {string}
+             */
+            analyzerProvider?: "ollama" | "openai" | "gemini";
+            /**
              * @description Opt-out cloud-fallback gate. When engine=local and a Gemini key is
              *     set, the analyzer falls back to Gemini iff the local daemon is
              *     unreachable — but only when this is true. Default true (non-
@@ -3281,6 +3286,15 @@ export interface components {
              *     as the Ollama tag when it has Ollama shape (contains ':').
              */
             ollamaUrl: string;
+            /** @description OpenAI-compatible API root, for example http://host.docker.internal:5001/v1. */
+            openaiBaseUrl?: string;
+            /** @description Model id sent to the OpenAI-compatible Chat Completions endpoint. */
+            openaiModel?: string;
+            /**
+             * @description Whether a bearer token is configured; the token itself is never returned.
+             * @enum {string}
+             */
+            readonly openaiApiKeyStatus?: "set" | "unset";
             /**
              * @description Optional override for the WORKSPACE_DIR env var. Read once at
              *     server startup — changes require a server restart to apply
@@ -3442,8 +3456,12 @@ export interface components {
             sidecarUrl?: string;
             /** @enum {string} */
             analysisEngine?: "local" | "gemini";
+            /** @enum {string} */
+            analyzerProvider?: "ollama" | "openai" | "gemini";
             allowCloudFallback?: boolean;
             ollamaUrl?: string;
+            openaiBaseUrl?: string;
+            openaiModel?: string;
             workspaceDirOverride?: string | null;
             exportSyncFolder?: string | null;
             minorCastMinLines?: number;

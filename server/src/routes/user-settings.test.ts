@@ -10,14 +10,7 @@
         submitted in PUT are ignored, not stored, not echoed verbatim. */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import {
-  mkdtempSync,
-  rmSync,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express, { type Express } from 'express';
@@ -183,6 +176,20 @@ describe('user-settings router', () => {
     expect(set.body.apiKeyStatus).toBe('set');
   });
 
+  it('stores an OpenAI-compatible key through its dedicated redacted endpoint', async () => {
+    const saved = await request(app)
+      .put('/api/user/settings/openai-key')
+      .send({ key: '  local-secret  ' });
+    expect(saved.status).toBe(200);
+    expect(saved.body.openaiApiKeyStatus).toBe('set');
+    expect(saved.body).not.toHaveProperty('openaiApiKey');
+    expect(JSON.stringify(saved.body)).not.toContain('local-secret');
+
+    const cleared = await request(app).put('/api/user/settings/openai-key').send({ key: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.openaiApiKeyStatus).toBe('unset');
+  });
+
   it('GET exposes only safe OpenAI-compatible provider metadata, including a colon-bearing model without an API key', async () => {
     process.env.ANALYZER_PROVIDER = 'openai';
     process.env.OPENAI_BASE_URL = 'http://openai.internal:8000/v1';
@@ -194,7 +201,7 @@ describe('user-settings router', () => {
     expect(res.status).toBe(200);
     expect(res.body.resolvedAnalyzerProvider).toBe('openai');
     expect(res.body.resolvedAnalyzerModel).toBe('vendor/model:latest');
-    expect(res.body).not.toHaveProperty('openaiBaseUrl');
+    expect(res.body.openaiBaseUrl).toBe('http://localhost:8000/v1');
     expect(res.body).not.toHaveProperty('openaiApiKey');
     expect(JSON.stringify(res.body)).not.toContain('openai.internal');
 
@@ -281,9 +288,12 @@ describe('user-settings router', () => {
       defaultTtsModelKeyExplicit: true,
       sidecarUrl: 'http://localhost:9100',
       analysisEngine: 'local',
+      analyzerProvider: 'openai',
       /* non-default (false) so the round-trip proves the opt-out persists. */
       allowCloudFallback: false,
       ollamaUrl: 'http://localhost:11500',
+      openaiBaseUrl: 'http://openai-box:8000/v1',
+      openaiModel: 'served-model',
       workspaceDirOverride: 'D:/audiobooks-ws',
       exportSyncFolder: '/tmp/export-sync',
       minorCastMinLines: 7,
@@ -308,6 +318,7 @@ describe('user-settings router', () => {
        added to userSettingsSchema without one trips this assertion. */
     const NON_WRITABLE = new Set([
       'geminiApiKey',
+      'openaiApiKey',
       'schemaVersion',
       'lastSeenAppVersion',
       'showWhatsNew',
@@ -356,16 +367,12 @@ describe('user-settings router', () => {
 
     it('clears the key when the body sends null', async () => {
       /* Seed a saved key first. */
-      await request(app)
-        .put('/api/user/settings/gemini-key')
-        .send({ key: 'temporary-key' });
+      await request(app).put('/api/user/settings/gemini-key').send({ key: 'temporary-key' });
       const set = await request(app).get('/api/user/settings');
       expect(set.body.apiKeyStatus).toBe('set');
 
       /* Clear it. */
-      const cleared = await request(app)
-        .put('/api/user/settings/gemini-key')
-        .send({ key: null });
+      const cleared = await request(app).put('/api/user/settings/gemini-key').send({ key: null });
       expect(cleared.status).toBe(200);
       expect(cleared.body.apiKeyStatus).toBe('unset');
 
@@ -376,9 +383,7 @@ describe('user-settings router', () => {
     it('env GEMINI_API_KEY wins over the UI-saved value (apiKeyStatus stays set)', async () => {
       /* Save a UI key, then set env to a DIFFERENT value. The status pill
          must reflect env first — that's the documented precedence. */
-      await request(app)
-        .put('/api/user/settings/gemini-key')
-        .send({ key: 'ui-saved-key' });
+      await request(app).put('/api/user/settings/gemini-key').send({ key: 'ui-saved-key' });
       process.env.GEMINI_API_KEY = 'env-key-wins';
 
       const res = await request(app).get('/api/user/settings');
@@ -386,9 +391,7 @@ describe('user-settings router', () => {
     });
 
     it('empty / whitespace-only strings coerce to null on save', async () => {
-      const res = await request(app)
-        .put('/api/user/settings/gemini-key')
-        .send({ key: '   ' });
+      const res = await request(app).put('/api/user/settings/gemini-key').send({ key: '   ' });
       expect(res.status).toBe(200);
       expect(res.body.apiKeyStatus).toBe('unset');
 
@@ -441,11 +444,8 @@ describe('user-settings router', () => {
     });
 
     it('rejects with 400 when the path is an empty string', async () => {
-      const res = await request(app)
-        .post('/api/user/settings/sync-folder/test')
-        .send({ path: '' });
+      const res = await request(app).post('/api/user/settings/sync-folder/test').send({ path: '' });
       expect(res.status).toBe(400);
     });
   });
-
 });

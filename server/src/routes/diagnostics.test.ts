@@ -32,6 +32,7 @@ vi.mock('../workspace/user-settings.js', () => ({
 }));
 vi.mock('../analyzer/openai-compatible.js', () => ({
   resolveOpenAICompatibleConfigFromEnv: () => resolveOpenAICompatibleConfigFromEnv(),
+  resolveOpenAICompatibleConfig: () => resolveOpenAICompatibleConfigFromEnv(),
 }));
 vi.mock('../workspace/paths.js', () => ({ WORKSPACE_ROOT: '/workspace' }));
 
@@ -63,7 +64,13 @@ beforeEach(() => {
     modelResident: true,
   });
   readGpuQueueState.mockResolvedValue({ queueDepth: 0, devices: [] });
-  probeFfmpeg.mockReturnValue({ ffmpeg: true, ffprobe: true, version: '8.1', belowFloor: false, minimum: '6.0' });
+  probeFfmpeg.mockReturnValue({
+    ffmpeg: true,
+    ffprobe: true,
+    version: '8.1',
+    belowFloor: false,
+    minimum: '6.0',
+  });
   probeDiskSpace.mockResolvedValue({ status: 'ok', freeGb: 142, path: '/workspace' });
   getResolvedAnalysisEngine.mockReturnValue('local');
   getResolvedGeminiApiKey.mockReturnValue(null);
@@ -223,7 +230,13 @@ describe('GET /api/diagnostics', () => {
   });
 
   it('WARNS (not fails) the ffmpeg row when the version is below the floor', async () => {
-    probeFfmpeg.mockReturnValue({ ffmpeg: true, ffprobe: true, version: '4.4', belowFloor: true, minimum: '6.0' });
+    probeFfmpeg.mockReturnValue({
+      ffmpeg: true,
+      ffprobe: true,
+      version: '4.4',
+      belowFloor: true,
+      minimum: '6.0',
+    });
     const res = await request(makeApp()).get('/api/diagnostics');
     const row = byId(res.body.checks, 'ffmpeg');
     expect(row.status).toBe('warn');
@@ -232,14 +245,26 @@ describe('GET /api/diagnostics', () => {
   });
 
   it('omits the version from the detail when the banner is unparseable', async () => {
-    probeFfmpeg.mockReturnValue({ ffmpeg: true, ffprobe: true, version: null, belowFloor: false, minimum: '6.0' });
+    probeFfmpeg.mockReturnValue({
+      ffmpeg: true,
+      ffprobe: true,
+      version: null,
+      belowFloor: false,
+      minimum: '6.0',
+    });
     const res = await request(makeApp()).get('/api/diagnostics');
     expect(byId(res.body.checks, 'ffmpeg').detail).toBe('both present');
     expect(byId(res.body.checks, 'ffmpeg').status).toBe('ok');
   });
 
   it('fails the ffmpeg row when a binary is missing', async () => {
-    probeFfmpeg.mockReturnValue({ ffmpeg: true, ffprobe: false, version: '8.1', belowFloor: false, minimum: '6.0' });
+    probeFfmpeg.mockReturnValue({
+      ffmpeg: true,
+      ffprobe: false,
+      version: '8.1',
+      belowFloor: false,
+      minimum: '6.0',
+    });
     const res = await request(makeApp()).get('/api/diagnostics');
     expect(byId(res.body.checks, 'ffmpeg').status).toBe('fail');
     expect(byId(res.body.checks, 'ffmpeg').detail).toMatch(/ffprobe/);

@@ -35,11 +35,15 @@ const getResolvedOllamaModel = vi.fn();
 const writeSetupCompletedAt = vi.fn();
 const resolveOpenAICompatibleConfigFromEnv = vi.fn();
 
-vi.mock('./models-status.js', () => ({ computeModelsStatus: (root: string) => computeModelsStatus(root) }));
+vi.mock('./models-status.js', () => ({
+  computeModelsStatus: (root: string) => computeModelsStatus(root),
+}));
 vi.mock('../tts/venv-core-package.js', () => ({
   venvCorePackageInstalled: () => venvCorePackageInstalled(),
 }));
-vi.mock('../tts/sidecar-supervisor.js', () => ({ getActiveSupervisor: () => getActiveSupervisor() }));
+vi.mock('../tts/sidecar-supervisor.js', () => ({
+  getActiveSupervisor: () => getActiveSupervisor(),
+}));
 vi.mock('../diagnostics/ffmpeg.js', () => ({ probeFfmpeg: () => probeFfmpeg() }));
 vi.mock('./ollama-health.js', () => ({ probeOllamaHealth: () => probeOllamaHealth() }));
 vi.mock('../workspace/user-settings.js', () => ({
@@ -52,6 +56,7 @@ vi.mock('../workspace/user-settings.js', () => ({
 }));
 vi.mock('../analyzer/openai-compatible.js', () => ({
   resolveOpenAICompatibleConfigFromEnv: () => resolveOpenAICompatibleConfigFromEnv(),
+  resolveOpenAICompatibleConfig: () => resolveOpenAICompatibleConfigFromEnv(),
 }));
 
 import { setupReadinessRouter } from './setup-readiness.js';
@@ -64,7 +69,11 @@ function makeApp() {
 
 type EngineState = 'not-installed' | 'package-missing' | 'weights-missing' | 'ready' | 'loaded';
 
-function engineStatus(state: EngineState, packageBroken = false, packageFault: PackageFault = 'ok') {
+function engineStatus(
+  state: EngineState,
+  packageBroken = false,
+  packageFault: PackageFault = 'ok',
+) {
   return { state, packageBroken, packageFault };
 }
 
@@ -72,11 +81,13 @@ function engineStatus(state: EngineState, packageBroken = false, packageFault: P
    all-healthy system (venv present, sidecar reachable, kokoro ready and not
    broken, qwen/coqui not installed) — individual tests override just the
    axis they care about, mirroring diagnostics.test.ts's convention. */
-function modelsStatus(overrides: {
-  runtime?: Partial<{ installedOnDisk: boolean; pythonFound: boolean; process: string }>;
-  engines?: Partial<Record<'kokoro' | 'qwen' | 'coqui', ReturnType<typeof engineStatus>>>;
-  info?: Partial<{ gpu: string; vramTotalMb: number | null }>;
-} = {}) {
+function modelsStatus(
+  overrides: {
+    runtime?: Partial<{ installedOnDisk: boolean; pythonFound: boolean; process: string }>;
+    engines?: Partial<Record<'kokoro' | 'qwen' | 'coqui', ReturnType<typeof engineStatus>>>;
+    info?: Partial<{ gpu: string; vramTotalMb: number | null }>;
+  } = {},
+) {
   return {
     runtime: { installedOnDisk: true, pythonFound: true, process: 'ready', ...overrides.runtime },
     engines: {
@@ -192,9 +203,11 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
        fall through to whatever the (irrelevant, in this scenario) engine
        states say instead (here: 'pass', since Kokoro is 'ready' per the
        beforeEach default). */
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      runtime: { installedOnDisk: false, pythonFound: true, process: 'down' },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        runtime: { installedOnDisk: false, pythonFound: true, process: 'down' },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -214,14 +227,16 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
        the sidecar genuinely IS up; the broken engine is surfaced through
        models.engines.kokoro.packageBroken -> tts's package-broken cause
        instead, which is the more accurate signal. */
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      runtime: { installedOnDisk: true, pythonFound: true, process: 'ready' },
-      engines: {
-        kokoro: engineStatus('ready', true, 'broken'), // disk-ready but live-confirmed broken
-        qwen: engineStatus('not-installed'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        runtime: { installedOnDisk: true, pythonFound: true, process: 'ready' },
+        engines: {
+          kokoro: engineStatus('ready', true, 'broken'), // disk-ready but live-confirmed broken
+          qwen: engineStatus('not-installed'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -246,13 +261,15 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
      surfaces (this one and the Admin console's diagnostics row, which never
      gated on disk at all) can no longer disagree. */
   it('a package-missing engine that is ALSO live-confirmed broken now fails tts, instead of silently passing', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      engines: {
-        kokoro: engineStatus('package-missing', false, 'broken'), // packageBroken false (disk-gated); packageFault broken (live-confirmed)
-        qwen: engineStatus('not-installed'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        engines: {
+          kokoro: engineStatus('package-missing', false, 'broken'), // packageBroken false (disk-gated); packageFault broken (live-confirmed)
+          qwen: engineStatus('not-installed'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -272,13 +289,15 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
      is already false here too, so this introduces no new false positive —
      only the correct fail replaces a wrong-and-silent pass. */
   it('a package-missing engine that the live probe ALSO confirms missing (the common shape — nothing attempted, spec absent) now fails tts too', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      engines: {
-        kokoro: engineStatus('package-missing', false, 'missing'), // packageBroken false (disk-gated); packageFault missing (live-confirmed)
-        qwen: engineStatus('not-installed'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        engines: {
+          kokoro: engineStatus('package-missing', false, 'missing'), // packageBroken false (disk-gated); packageFault missing (live-confirmed)
+          qwen: engineStatus('not-installed'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -288,13 +307,15 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
   });
 
   it('derives weightsMissingEngine from models.engines — a weights-missing kokoro with nothing else usable surfaces as tts:weights-missing', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      engines: {
-        kokoro: engineStatus('weights-missing'),
-        qwen: engineStatus('not-installed'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        engines: {
+          kokoro: engineStatus('weights-missing'),
+          qwen: engineStatus('not-installed'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -303,13 +324,15 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
   });
 
   it('anyEngineUsable off a DIFFERENT engine masks a broken/missing one — a usable qwen alongside a weights-missing kokoro surfaces tts:pass', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      engines: {
-        kokoro: engineStatus('weights-missing'),
-        qwen: engineStatus('ready'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        engines: {
+          kokoro: engineStatus('weights-missing'),
+          qwen: engineStatus('ready'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -317,13 +340,15 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
   });
 
   it('noEngineAtAll — every engine not-installed surfaces tts:no-engine-installed', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      engines: {
-        kokoro: engineStatus('not-installed'),
-        qwen: engineStatus('not-installed'),
-        coqui: engineStatus('not-installed'),
-      },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        engines: {
+          kokoro: engineStatus('not-installed'),
+          qwen: engineStatus('not-installed'),
+          coqui: engineStatus('not-installed'),
+        },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -332,9 +357,11 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
   });
 
   it('surfaces info.gpu and info.vramTotalMb straight from computeModelsStatus', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      info: { gpu: 'cuda · 1.2/8.0 GB', vramTotalMb: 8192 },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        info: { gpu: 'cuda · 1.2/8.0 GB', vramTotalMb: 8192 },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 
@@ -343,9 +370,11 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
   });
 
   it('surfaces a null vramTotalMb when there is no GPU', async () => {
-    computeModelsStatus.mockResolvedValue(modelsStatus({
-      info: { gpu: 'CPU — no GPU detected', vramTotalMb: null },
-    }));
+    computeModelsStatus.mockResolvedValue(
+      modelsStatus({
+        info: { gpu: 'CPU — no GPU detected', vramTotalMb: null },
+      }),
+    );
 
     const res = await request(makeApp()).get('/api/setup/readiness');
 

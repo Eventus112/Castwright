@@ -32,6 +32,8 @@ export interface AccountState extends UserSettings {
   /** Curated install list (server's single source). Populated by
       `fetchAnalyzerModels`; the pickers + Model Manager read this. */
   pullableModels: string[];
+  /** Models discovered from the configured OpenAI-compatible /v1/models endpoint. */
+  openaiAnalyzerModels?: string[];
 }
 
 const initialState: AccountState = {
@@ -46,6 +48,7 @@ const initialState: AccountState = {
   hydrated: false,
   localAnalyzerModels: [],
   pullableModels: [],
+  openaiAnalyzerModels: [],
 };
 
 export const fetchAccountSettings = createAsyncThunk<UserSettings>('account/fetch', async () => {
@@ -69,17 +72,30 @@ export const saveGeminiApiKey = createAsyncThunk<UserSettings, string | null>(
   },
 );
 
+export const saveOpenAIApiKey = createAsyncThunk<UserSettings, string | null>(
+  'account/saveOpenAIKey',
+  async (key) => api.putOpenAIKey(key),
+);
+
 /* Dynamic analyzer-model discovery — hits the mockable `api.getOllamaHealth()`
    so it works under VITE_USE_MOCKS + e2e. Splits the response into the live
    local tags (empty when Ollama is unreachable) and the server's curated
    `pullable` install list. The pickers + Model Manager read both off state. */
 export const fetchAnalyzerModels = createAsyncThunk('account/fetchAnalyzerModels', async () => {
-  const health = await api.getOllamaHealth();
+  const openAIModelsPromise =
+    typeof api.getOpenAIModels === 'function'
+      ? api.getOpenAIModels().catch(() => ({ models: [] as string[] }))
+      : Promise.resolve({ models: [] as string[] });
+  const [health, openAI] = await Promise.all([api.getOllamaHealth(), openAIModelsPromise]);
   const localTags: LocalAnalyzerTag[] =
     health.status === 'reachable' && Array.isArray(health.models)
       ? health.models.map((name) => ({ name }))
       : [];
-  return { localTags, pullable: Array.isArray(health.pullable) ? health.pullable : [] };
+  return {
+    localTags,
+    pullable: Array.isArray(health.pullable) ? health.pullable : [],
+    openAI: Array.isArray(openAI.models) ? openAI.models : [],
+  };
 });
 
 export const accountSlice = createSlice({
@@ -198,9 +214,24 @@ export const accountSlice = createSlice({
         s.status = 'error';
         s.error = a.error.message ?? 'Failed to save Gemini API key.';
       })
+      .addCase(saveOpenAIApiKey.pending, (s) => {
+        s.status = 'saving';
+        s.error = null;
+      })
+      .addCase(saveOpenAIApiKey.fulfilled, (s, a) => {
+        Object.assign(s, a.payload);
+        s.status = 'idle';
+        s.error = null;
+        s.hydrated = true;
+      })
+      .addCase(saveOpenAIApiKey.rejected, (s, a) => {
+        s.status = 'error';
+        s.error = a.error.message ?? 'Failed to save OpenAI-compatible API key.';
+      })
       .addCase(fetchAnalyzerModels.fulfilled, (state, action) => {
         state.localAnalyzerModels = action.payload.localTags;
         state.pullableModels = action.payload.pullable;
+        state.openaiAnalyzerModels = action.payload.openAI;
       });
   },
 });
