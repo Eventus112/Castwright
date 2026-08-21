@@ -179,6 +179,7 @@ describe('OpenAICompatibleAnalyzer', () => {
         new Response(`${secret}:${'x'.repeat(10_000)}`, {
           status: 503,
           statusText: 'Unavailable',
+          headers: { 'Retry-After': '0' },
         }),
       ),
     );
@@ -198,6 +199,48 @@ describe('OpenAICompatibleAnalyzer', () => {
     expect(err?.status).toBe(503);
     expect(err?.message).not.toContain(secret);
     expect(err?.message.length).toBeLessThan(4_400);
+  });
+
+  it('retries temporary queue failures and succeeds without losing the stage', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('{"error":{"code":"request_queue_timeout"}}', {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: { 'Retry-After': '0' },
+        }),
+      )
+      .mockResolvedValueOnce(completion('{"nonStory":false}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const analyzer = new OpenAICompatibleAnalyzer({
+      baseUrl: 'http://localhost:8000/v1',
+      model: 'local-model',
+    });
+
+    await expect(
+      analyzer.runNonStoryClassification('openai_queue_retry', 14, '# prompt', {}),
+    ).resolves.toEqual({ nonStory: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a permanent client error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"error":{"message":"unknown model"}}', {
+        status: 400,
+        statusText: 'Bad Request',
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const analyzer = new OpenAICompatibleAnalyzer({
+      baseUrl: 'http://localhost:8000/v1',
+      model: 'missing-model',
+    });
+
+    await expect(
+      analyzer.runNonStoryClassification('openai_no_retry', 1, '# prompt', {}),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('maps an aborted request to AnalysisAbortedError without calling fetch', async () => {

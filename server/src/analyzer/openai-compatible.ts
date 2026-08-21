@@ -44,6 +44,10 @@ import { getCachedUserSettings, getResolvedAnalyzerProvider } from '../workspace
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_ERROR_BYTES = 4 * 1024;
+const MAX_HTTP_ATTEMPTS = 3;
+const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+const MAX_RETRY_DELAY_MS = 30_000;
 
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -199,6 +203,37 @@ async function readBoundedBody(
       // The reader may already have been released by cancellation.
     }
   }
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const raw = response.headers.get('retry-after')?.trim();
+  if (raw) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1_000, MAX_RETRY_DELAY_MS);
+    }
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) return Math.min(Math.max(0, at - Date.now()), MAX_RETRY_DELAY_MS);
+  }
+  return Math.min(DEFAULT_RETRY_DELAY_MS * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
+}
+
+async function waitBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new AnalysisAbortedError('OpenAI-compatible retry aborted.');
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      signal?.removeEventListener('abort', aborted);
+      resolve();
+    }
+    function aborted(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', aborted);
+      reject(new AnalysisAbortedError('OpenAI-compatible retry aborted.'));
+    }
+    signal?.addEventListener('abort', aborted, { once: true });
+  });
 }
 
 export class OpenAICompatibleAnalyzer implements Analyzer {
@@ -437,47 +472,63 @@ export class OpenAICompatibleAnalyzer implements Analyzer {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     const start = Date.now();
-    let response: Response;
-    try {
-      response = await fetch(this.endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ model: this.model, messages, stream: false }),
-        signal: call.signal,
-      });
-    } catch (err) {
-      if (call.signal?.aborted || (err as Error)?.name === 'AbortError') {
-        throw new AnalysisAbortedError(
-          `OpenAI-compatible ${this.model} fetch aborted (client disconnected).`,
-        );
+    let response!: Response;
+    let bounded!: { text: string; truncated: boolean };
+    for (let attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
+      try {
+        response = await fetch(this.endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model: this.model, messages, stream: false }),
+          signal: call.signal,
+        });
+      } catch (err) {
+        if (call.signal?.aborted || (err as Error)?.name === 'AbortError') {
+          throw new AnalysisAbortedError(
+            `OpenAI-compatible ${this.model} fetch aborted (client disconnected).`,
+          );
+        }
+        const detail = redact((err as Error)?.message ?? String(err), this.apiKey).slice(0, 500);
+        throw new Error(`OpenAI-compatible request failed: ${detail}`);
       }
-      const detail = redact((err as Error)?.message ?? String(err), this.apiKey).slice(0, 500);
-      throw new Error(`OpenAI-compatible request failed: ${detail}`);
-    }
 
-    let bounded: { text: string; truncated: boolean };
-    try {
-      bounded = await readBoundedBody(response, response.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BYTES);
-    } catch (err) {
-      if (call.signal?.aborted || (err as Error)?.name === 'AbortError') {
-        throw new AnalysisAbortedError(
-          `OpenAI-compatible ${this.model} response aborted (client disconnected).`,
+      try {
+        bounded = await readBoundedBody(
+          response,
+          response.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BYTES,
         );
+      } catch (err) {
+        if (call.signal?.aborted || (err as Error)?.name === 'AbortError') {
+          throw new AnalysisAbortedError(
+            `OpenAI-compatible ${this.model} response aborted (client disconnected).`,
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
 
-    if (!response.ok) {
+      if (response.ok) break;
+
       const suffix = bounded.truncated ? '…' : '';
       const detail = redact(bounded.text, this.apiKey);
-      throw new OpenAICompatibleHttpError(
+      const error = new OpenAICompatibleHttpError(
         redact(
           `OpenAI-compatible endpoint returned ${response.status} ${response.statusText}: ${detail}${suffix}`,
           this.apiKey,
         ).slice(0, MAX_ERROR_BYTES + 200),
         response.status,
       );
+      if (!RETRYABLE_HTTP_STATUSES.has(response.status) || attempt === MAX_HTTP_ATTEMPTS) {
+        throw error;
+      }
+
+      const delayMs = retryDelayMs(response, attempt);
+      console.warn(
+        `[openai-compatible] ${this.model} returned HTTP ${response.status}; retrying ` +
+          `attempt ${attempt + 1}/${MAX_HTTP_ATTEMPTS} in ${delayMs}ms.`,
+      );
+      await waitBeforeRetry(delayMs, call.signal);
     }
+
     if (bounded.truncated) {
       throw new Error(
         `OpenAI-compatible ${this.model} response exceeded ${MAX_RESPONSE_BYTES} bytes.`,
