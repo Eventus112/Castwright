@@ -175,6 +175,19 @@ describe('accountSlice — dual-model flag', () => {
 });
 
 describe('accountSlice — Analyzer card (plan 88 phase-2)', () => {
+  it('hydrates the server-resolved analyzer provider and model metadata', async () => {
+    (api.getUserSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...SERVER_FIXTURE,
+      resolvedAnalyzerProvider: 'openai',
+      resolvedAnalyzerModel: 'vendor/model:latest',
+    });
+    const store = makeStore();
+    await store.dispatch(fetchAccountSettings());
+
+    expect(store.getState().account.resolvedAnalyzerProvider).toBe('openai');
+    expect(store.getState().account.resolvedAnalyzerModel).toBe('vendor/model:latest');
+  });
+
   it('hydrates the three analyzer fields from the server fetch response', async () => {
     (api.getUserSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...SERVER_FIXTURE,

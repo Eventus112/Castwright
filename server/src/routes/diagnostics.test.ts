@@ -14,6 +14,7 @@ const probeFfmpeg = vi.fn();
 const probeDiskSpace = vi.fn();
 const getResolvedAnalysisEngine = vi.fn();
 const getResolvedGeminiApiKey = vi.fn();
+const resolveOpenAICompatibleConfigFromEnv = vi.fn();
 
 vi.mock('./sidecar-health.js', () => ({ probeSidecarHealth: () => probeSidecarHealth() }));
 vi.mock('./ollama-health.js', () => ({ probeOllamaHealth: () => probeOllamaHealth() }));
@@ -28,6 +29,9 @@ vi.mock('../workspace/user-settings.js', () => ({
   getResolvedAnalysisEngine: () => getResolvedAnalysisEngine(),
   getResolvedGeminiApiKey: () => getResolvedGeminiApiKey(),
   readConfigOverrides: () => ({}),
+}));
+vi.mock('../analyzer/openai-compatible.js', () => ({
+  resolveOpenAICompatibleConfigFromEnv: () => resolveOpenAICompatibleConfigFromEnv(),
 }));
 vi.mock('../workspace/paths.js', () => ({ WORKSPACE_ROOT: '/workspace' }));
 
@@ -63,9 +67,10 @@ beforeEach(() => {
   probeDiskSpace.mockResolvedValue({ status: 'ok', freeGb: 142, path: '/workspace' });
   getResolvedAnalysisEngine.mockReturnValue('local');
   getResolvedGeminiApiKey.mockReturnValue(null);
+  resolveOpenAICompatibleConfigFromEnv.mockReturnValue({ enabled: false });
 });
 
-type Check = { id: string; status: string; detail: string };
+type Check = { id: string; label: string; status: string; detail: string };
 const byId = (checks: Check[], id: string) => checks.find((c) => c.id === id)!;
 
 describe('GET /api/diagnostics', () => {
@@ -160,6 +165,27 @@ describe('GET /api/diagnostics', () => {
     expect(byId(res.body.checks, 'analyzer').detail).toMatch(/not in use/i);
     expect(probeOllamaHealth).not.toHaveBeenCalled();
     expect(byId(res.body.checks, 'gemini').status).toBe('ok');
+  });
+
+  it('reports a safe OpenAI-compatible analyzer row and skips Ollama/Gemini checks', async () => {
+    resolveOpenAICompatibleConfigFromEnv.mockReturnValue({
+      enabled: true,
+      baseUrl: 'http://secret-host.internal:8000/v1',
+      endpoint: 'http://secret-host.internal:8000/v1/chat/completions',
+      model: 'vendor/model:latest',
+      apiKey: 'secret-key',
+    });
+
+    const res = await request(makeApp()).get('/api/diagnostics');
+    const analyzer = byId(res.body.checks, 'analyzer');
+
+    expect(analyzer).toMatchObject({ status: 'ok' });
+    expect(analyzer.label).toBe('Analyzer (OpenAI-compatible)');
+    expect(analyzer.detail).toContain('vendor/model:latest');
+    expect(JSON.stringify(res.body)).not.toContain('secret-host.internal');
+    expect(JSON.stringify(res.body)).not.toContain('secret-key');
+    expect(probeOllamaHealth).not.toHaveBeenCalled();
+    expect(getResolvedGeminiApiKey).not.toHaveBeenCalled();
   });
 
   it('fails the gemini row when Gemini is selected but no key is set', async () => {

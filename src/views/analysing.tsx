@@ -303,6 +303,9 @@ export function AnalysingView({
   const selectedModelExplicit = useAppSelector((s) => s.ui.selectedModelExplicit);
   const phase0Model = useAppSelector((s) => s.account.analyzerPhase0Model);
   const phase1Model = useAppSelector((s) => s.account.analyzerPhase1Model);
+  const resolvedAnalyzerProvider = useAppSelector(
+    (s) => s.account.resolvedAnalyzerProvider,
+  );
   /* Live local Ollama tags for the failed-retry model picker (curated ∪ live),
      so a model the user just pulled is selectable here. Fetched only AFTER a
      failure (gated on `error` below) — a healthy cloud run never probes Ollama,
@@ -319,13 +322,16 @@ export function AnalysingView({
     if (error) void dispatch(fetchAnalyzerModels());
   }, [dispatch, error]);
   const requestModel = splitActive && !selectedModelExplicit ? undefined : model;
-  /* The model id(s) the run will ACTUALLY execute on. The readiness/engine
-     gate MUST derive from these, not from ui.selectedModel: ui.selectedModel is
-     re-seeded from the account default on every boot (ui-slice.ts), so a user
-     who once used Ollama keeps a stale LOCAL default there even after switching
-     the per-phase dropdowns to a cloud model. Reading it directly left the view
-     "stuck on Ollama" — probing the daemon, blocking Start on VRAM residency —
-     for a Gemini run that never calls Ollama. Mirror requestModel exactly:
+  /* The model id(s) the request would select when there is no server-level
+     provider override. The Ollama readiness gate derives from these, not from
+     ui.selectedModel: ui.selectedModel is re-seeded from the account default on
+     every boot (ui-slice.ts), so a user who once used Ollama keeps a stale LOCAL
+     default there even after switching the per-phase dropdowns to a cloud model.
+     Reading it directly left the view "stuck on Ollama" — probing the daemon,
+     blocking Start on VRAM residency — for a cloud run that never calls Ollama.
+     A resolved OpenAI-compatible provider bypasses this model-name heuristic
+     entirely because the backend overrides the request model. Otherwise mirror
+     requestModel exactly:
        - split engaged, no explicit pick → the saved per-phase models (a blank
          phase falls through to the server's own default, which the client
          can't see; treat as not-local so a cloud deployment isn't gated on an
@@ -337,7 +343,9 @@ export function AnalysingView({
     }
     return [model ?? MODEL_OPTIONS[0].id];
   }, [splitActive, selectedModelExplicit, phase0Model, phase1Model, model]);
-  const isLocalAnalyzer = effectiveModelIds.some((id) => engineForModelId(id) === 'local');
+  const isLocalAnalyzer =
+    resolvedAnalyzerProvider !== 'openai' &&
+    effectiveModelIds.some((id) => engineForModelId(id) === 'local');
   /* Engine tag captured into the cross-navigation snapshot (read by the
      reverse-local-analyzer guard). Mirror the effective-local derivation so a
      cloud run is never mis-tagged 'local' and made to nag the TTS-start path. */

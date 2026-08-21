@@ -26,6 +26,7 @@ import { readinessSeverity } from '../tts/engine-presence.js';
 import { VOICE_ENGINES, type VoiceEngineId } from '../tts/voice-engine-registry.js';
 import type { EngineId } from '../tts/engine-health.js';
 import { classifyPackageFault } from '../tts/models-status.js';
+import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 export type CheckId = 'gpu' | 'sidecar' | 'asr' | 'analyzer' | 'gemini' | 'ffmpeg' | 'disk';
@@ -81,7 +82,8 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
   const sidecar = await probeSidecarHealth().catch(
     (e: Error) => ({ status: 'unreachable' as const, url: '', proxy: 'sidecar' as const, error: e.message }),
   );
-  const engine = getResolvedAnalysisEngine();
+  const openAI = resolveOpenAICompatibleConfigFromEnv();
+  const engine = openAI.enabled ? null : getResolvedAnalysisEngine();
   /* Callers that only need a subset of checks (e.g. GET /api/setup/readiness,
      which re-derives its own ffmpeg/analyzer diagnosis from richer data than
      a DiagnosticsCheck row exposes) can skip the rest so this aggregator
@@ -253,9 +255,19 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
       };
     } },
 
-    // Analyzer (Ollama) connectivity — only meaningful when the local engine
-    // is selected; with Gemini it's not in use and never a failure.
+    // Analyzer connectivity/configuration. Ollama is probed only when the
+    // saved local engine is effective; provider overrides and Gemini do not
+    // depend on the local daemon.
     { id: 'analyzer', label: 'Analyzer (Ollama)', body: async () => {
+      if (openAI.enabled) {
+        return {
+          id: 'analyzer',
+          label: 'Analyzer (OpenAI-compatible)',
+          status: 'ok',
+          detail: `configured · model "${openAI.model}"`,
+          value: openAI.model,
+        };
+      }
       if (engine !== 'local') {
         return {
           id: 'analyzer',
@@ -295,6 +307,14 @@ export async function buildDiagnostics(opts?: { skip?: CheckId[] }): Promise<Dia
     // Gemini config presence (no live call) — only fails when Gemini is the
     // selected engine but no key is configured.
     { id: 'gemini', label: 'Analyzer (Gemini)', body: () => {
+      if (openAI.enabled) {
+        return {
+          id: 'gemini',
+          label: 'Analyzer (Gemini)',
+          status: 'ok',
+          detail: 'not in use (provider: openai)',
+        };
+      }
       const hasKey = getResolvedGeminiApiKey() != null;
       if (engine !== 'gemini') {
         return {

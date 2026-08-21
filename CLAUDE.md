@@ -476,6 +476,16 @@ Design rationale:
     `GEMINI_TPM_*` / `GEMINI_RPD_*` overrides and
     [docs/features/archive/06-analyzer-gemini.md](docs/features/archive/06-analyzer-gemini.md)
     for the limits table.
+  - **OpenAI-compatible deployment override** — `ANALYZER_PROVIDER=openai`
+    intentionally takes precedence over the saved engine, per-request model,
+    and phase model overrides. It requires `OPENAI_BASE_URL` and
+    `OPENAI_MODEL`; `OPENAI_API_KEY` is optional and stays env-only. This path
+    uses the minimal non-streaming Chat Completions `model`/`messages`
+    contract and remains inside the existing public remote/cloud engine
+    envelope. `GET /api/user/settings` exposes only the effective provider and
+    model so browser readiness does not probe Ollama; it never exposes the
+    endpoint or key. See
+    [plan 284](docs/features/284-docker-openai-compatible.md).
 
 ## Layout
 

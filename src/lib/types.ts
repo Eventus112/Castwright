@@ -126,8 +126,8 @@ export type TtsEngine = NonNullable<BaseVoice['engine']>;
 
 /* User-level account defaults + non-secret server overrides. Mirrors the
    /api/user/settings response. Read-only fields (apiKeyStatus, workspaceRoot,
-   workspaceSource) come from the server's env layer and can't be edited
-   through the PUT endpoint. */
+   workspaceSource, resolvedAnalyzerProvider, resolvedAnalyzerModel) come from
+   the server's env layer and can't be edited through the PUT endpoint. */
 /* srv-2 — per-book state.json auto-backup preferences. Declared as an
    intersection on top of the generated schema so the three optional fields
    are available to the slice + Account view even before `openapi:types`

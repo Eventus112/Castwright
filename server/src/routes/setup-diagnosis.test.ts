@@ -367,6 +367,16 @@ describe('diagnoseAnalyzer', () => {
 const base = { expectedModel: 'qwen3.5:4b', pullable: ['qwen3.5:4b', 'llama3.1:8b'], ollamaError: null };
 
 describe('diagnoseAnalyzer tri-state', () => {
+  it('openai-compatible configured → pass without provider-specific credentials or probes', () => {
+    expect(
+      diagnoseAnalyzer({ provider: 'openai', model: 'vendor/model:latest' }),
+    ).toMatchObject({
+      status: 'pass',
+      cause: 'pass',
+      message: 'OpenAI-compatible analyzer configured · vendor/model:latest.',
+    });
+  });
+
   // engine = gemini
   it('gemini, no key → fail', () => {
     expect(diagnoseAnalyzer({ ...base, engine: 'gemini', geminiKeySet: false, ollamaReachable: false, modelPulled: false, anyAnalyzerModelPulled: false }).status).toBe('fail');

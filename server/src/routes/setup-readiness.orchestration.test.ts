@@ -33,6 +33,7 @@ const getResolvedGeminiApiKey = vi.fn();
 const getResolvedSetupCompletedAt = vi.fn();
 const getResolvedOllamaModel = vi.fn();
 const writeSetupCompletedAt = vi.fn();
+const resolveOpenAICompatibleConfigFromEnv = vi.fn();
 
 vi.mock('./models-status.js', () => ({ computeModelsStatus: (root: string) => computeModelsStatus(root) }));
 vi.mock('../tts/venv-core-package.js', () => ({
@@ -48,6 +49,9 @@ vi.mock('../workspace/user-settings.js', () => ({
   getResolvedOllamaModel: () => getResolvedOllamaModel(),
   writeSetupCompletedAt: (ts: string) => writeSetupCompletedAt(ts),
   readConfigOverrides: () => ({}),
+}));
+vi.mock('../analyzer/openai-compatible.js', () => ({
+  resolveOpenAICompatibleConfigFromEnv: () => resolveOpenAICompatibleConfigFromEnv(),
 }));
 
 import { setupReadinessRouter } from './setup-readiness.js';
@@ -109,6 +113,7 @@ beforeEach(() => {
   getResolvedGeminiApiKey.mockReturnValue(null);
   getResolvedSetupCompletedAt.mockReturnValue(null);
   getResolvedOllamaModel.mockReturnValue('qwen3.5:4b');
+  resolveOpenAICompatibleConfigFromEnv.mockReturnValue({ enabled: false });
 });
 
 describe('GET /api/setup/readiness — orchestration wiring', () => {
@@ -119,6 +124,28 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
     expect(res.body.blockers.sidecar.cause).toBe('pass');
     expect(res.body.blockers.tts.cause).toBe('pass');
     expect(res.body.info.vramTotalMb).toBe(8192);
+  });
+
+  it('a valid OpenAI-compatible override is ready without probing Ollama or requiring a Gemini key', async () => {
+    resolveOpenAICompatibleConfigFromEnv.mockReturnValue({
+      enabled: true,
+      baseUrl: 'http://openai.internal:8000/v1',
+      endpoint: 'http://openai.internal:8000/v1/chat/completions',
+      model: 'vendor/model:latest',
+      apiKey: '',
+    });
+
+    const res = await request(makeApp()).get('/api/setup/readiness');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ready).toBe(true);
+    expect(res.body.blockers.analyzer).toMatchObject({
+      status: 'pass',
+      cause: 'pass',
+    });
+    expect(res.body.blockers.analyzer.message).toContain('vendor/model:latest');
+    expect(probeOllamaHealth).not.toHaveBeenCalled();
+    expect(getResolvedGeminiApiKey).not.toHaveBeenCalled();
   });
 
   /* ops-35 (#1877) invariant 4 — THE load-bearing promise of the ffmpeg floor:

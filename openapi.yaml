@@ -4475,6 +4475,18 @@ components:
             `kokoro-v1`. The frontend seeds `ui.ttsModelKey` from THIS so a box
             with Qwen installed defaults to bespoke voices without mutating the
             stored key.
+        resolvedAnalyzerProvider:
+          type: string
+          enum: [openai]
+          description: |
+            READ-ONLY effective analyzer provider when a server-level override
+            is active. Omitted when analyzer selection follows the saved
+            local/Gemini settings. Never includes endpoint or credential data.
+        resolvedAnalyzerModel:
+          type: string
+          description: |
+            READ-ONLY model id paired with `resolvedAnalyzerProvider`.
+            Omitted when no server-level analyzer override is active.
         sidecarUrl:
           type: string
           description: |
@@ -4667,7 +4679,8 @@ components:
       type: object
       description: |
         Partial update payload. Read-only fields (apiKeyStatus,
-        workspaceRoot, workspaceSource) are ignored. Any `geminiApiKey`-
+        workspaceRoot, workspaceSource, resolvedAnalyzerProvider,
+        resolvedAnalyzerModel) are ignored. Any `geminiApiKey`-
         shaped field is dropped — the API key only lives in server/.env.
       properties:
         displayName: { type: string }

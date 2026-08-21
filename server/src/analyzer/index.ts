@@ -20,6 +20,10 @@ import type {
   NonStoryClassificationOutput,
 } from '../handoff/schemas.js';
 import { GeminiAnalyzer } from './gemini.js';
+import {
+  OpenAICompatibleAnalyzer,
+  resolveOpenAICompatibleConfigFromEnv,
+} from './openai-compatible.js';
 import { OllamaAnalyzer, LocalUnreachableError, AnalysisAbortedError } from './ollama.js';
 import type { RawEvalTiming } from './analyzer-eval-stats.js';
 import {
@@ -197,6 +201,25 @@ function inferEngineFromModelId(modelId: string): 'local' | 'gemini' {
 }
 
 export function selectAnalyzer(opts: SelectAnalyzerOptions = {}): AnalyzerSelection {
+  /* Container/ops override. This check intentionally precedes model-shape,
+     per-request and saved-engine inference: once the process declares an
+     OpenAI-compatible provider, every analyzer phase uses that endpoint. */
+  const openAIConfig = resolveOpenAICompatibleConfigFromEnv();
+  if (openAIConfig.enabled) {
+    return {
+      analyzer: new OpenAICompatibleAnalyzer({
+        baseUrl: openAIConfig.baseUrl,
+        model: openAIConfig.model,
+        apiKey: openAIConfig.apiKey,
+      }),
+      /* Keep the existing public remote/cloud envelope until the UI and
+         OpenAPI grow a provider discriminator of their own. */
+      engine: 'gemini',
+      model: openAIConfig.model,
+      fallbackModel: null,
+    };
+  }
+
   const engine = opts.model ? inferEngineFromModelId(opts.model) : getResolvedAnalysisEngine();
   /* Plan 49 — read the Gemini API key via the resolver: env wins for CI /
      power users, then falls through to the UI-saved user-settings field.

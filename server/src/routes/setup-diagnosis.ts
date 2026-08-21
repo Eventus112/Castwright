@@ -305,7 +305,8 @@ export function anyAnalyzerModelPulled(pulledTags: string[], curated: string[]):
   });
 }
 
-export interface AnalyzerDiagnosisInput {
+interface BuiltInAnalyzerDiagnosisInput {
+  provider?: undefined;
   engine: 'local' | 'gemini';
   ollamaReachable: boolean;
   ollamaError: string | null;
@@ -318,7 +319,19 @@ export interface AnalyzerDiagnosisInput {
   geminiKeySet: boolean;
 }
 
+export type AnalyzerDiagnosisInput =
+  | BuiltInAnalyzerDiagnosisInput
+  | { provider: 'openai'; model: string };
+
 export function diagnoseAnalyzer(input: AnalyzerDiagnosisInput): BlockerDiagnosis {
+  if (input.provider === 'openai') {
+    return diagnosis(
+      'pass',
+      'pass',
+      `OpenAI-compatible analyzer configured · ${input.model}.`,
+      '',
+    );
+  }
   // ── Gate: byte-identical to today's pass/fail (fallback NOT modeled) ──
   if (input.engine === 'gemini') {
     if (!input.geminiKeySet) {

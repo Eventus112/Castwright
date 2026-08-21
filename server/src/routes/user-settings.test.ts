@@ -54,6 +54,10 @@ afterAll(() => {
   if (workspaceRoot) rmSync(workspaceRoot, { recursive: true, force: true });
   delete process.env.WORKSPACE_DIR;
   delete process.env.GEMINI_API_KEY;
+  delete process.env.ANALYZER_PROVIDER;
+  delete process.env.OPENAI_BASE_URL;
+  delete process.env.OPENAI_MODEL;
+  delete process.env.OPENAI_API_KEY;
 });
 
 beforeEach(() => {
@@ -65,6 +69,10 @@ beforeEach(() => {
   resetCache();
   delete process.env.GEMINI_API_KEY;
   delete process.env.GEN_WORKERS;
+  delete process.env.ANALYZER_PROVIDER;
+  delete process.env.OPENAI_BASE_URL;
+  delete process.env.OPENAI_MODEL;
+  delete process.env.OPENAI_API_KEY;
 });
 
 describe('user-settings router', () => {
@@ -173,6 +181,27 @@ describe('user-settings router', () => {
     process.env.GEMINI_API_KEY = 'fake-but-non-empty';
     const set = await request(app).get('/api/user/settings');
     expect(set.body.apiKeyStatus).toBe('set');
+  });
+
+  it('GET exposes only safe OpenAI-compatible provider metadata, including a colon-bearing model without an API key', async () => {
+    process.env.ANALYZER_PROVIDER = 'openai';
+    process.env.OPENAI_BASE_URL = 'http://openai.internal:8000/v1';
+    process.env.OPENAI_MODEL = 'vendor/model:latest';
+    delete process.env.OPENAI_API_KEY;
+
+    const res = await request(app).get('/api/user/settings');
+
+    expect(res.status).toBe(200);
+    expect(res.body.resolvedAnalyzerProvider).toBe('openai');
+    expect(res.body.resolvedAnalyzerModel).toBe('vendor/model:latest');
+    expect(res.body).not.toHaveProperty('openaiBaseUrl');
+    expect(res.body).not.toHaveProperty('openaiApiKey');
+    expect(JSON.stringify(res.body)).not.toContain('openai.internal');
+
+    process.env.OPENAI_API_KEY = 'do-not-leak';
+    const keyed = await request(app).get('/api/user/settings');
+    expect(keyed.status).toBe(200);
+    expect(JSON.stringify(keyed.body)).not.toContain('do-not-leak');
   });
 
   it('GET exposes workspaceRoot + workspaceSource for the UI to display', async () => {

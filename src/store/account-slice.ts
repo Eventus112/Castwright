@@ -39,6 +39,8 @@ const initialState: AccountState = {
   apiKeyStatus: 'unset',
   workspaceRoot: '',
   workspaceSource: 'default',
+  resolvedAnalyzerProvider: undefined,
+  resolvedAnalyzerModel: undefined,
   status: 'idle',
   error: null,
   hydrated: false,
@@ -154,6 +156,8 @@ export const accountSlice = createSlice({
       })
       .addCase(fetchAccountSettings.fulfilled, (s, a) => {
         Object.assign(s, a.payload);
+        s.resolvedAnalyzerProvider = a.payload.resolvedAnalyzerProvider;
+        s.resolvedAnalyzerModel = a.payload.resolvedAnalyzerModel;
         s.status = 'idle';
         s.error = null;
         s.hydrated = true;
@@ -168,6 +172,8 @@ export const accountSlice = createSlice({
       })
       .addCase(saveAccountSettings.fulfilled, (s, a) => {
         Object.assign(s, a.payload);
+        s.resolvedAnalyzerProvider = a.payload.resolvedAnalyzerProvider;
+        s.resolvedAnalyzerModel = a.payload.resolvedAnalyzerModel;
         s.status = 'idle';
         s.error = null;
         s.hydrated = true;
@@ -182,6 +188,8 @@ export const accountSlice = createSlice({
       })
       .addCase(saveGeminiApiKey.fulfilled, (s, a) => {
         Object.assign(s, a.payload);
+        s.resolvedAnalyzerProvider = a.payload.resolvedAnalyzerProvider;
+        s.resolvedAnalyzerModel = a.payload.resolvedAnalyzerModel;
         s.status = 'idle';
         s.error = null;
         s.hydrated = true;

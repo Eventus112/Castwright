@@ -3238,6 +3238,18 @@ export interface components {
              */
             resolvedTtsModelKey?: "kokoro-v1" | "qwen3-tts-0.6b" | "qwen3-tts-1.7b" | "coqui-xtts-v2" | "gemini-2.5-flash" | "gemini-3.1-flash";
             /**
+             * @description READ-ONLY effective analyzer provider when a server-level override
+             *     is active. Omitted when analyzer selection follows the saved
+             *     local/Gemini settings. Never includes endpoint or credential data.
+             * @enum {string}
+             */
+            resolvedAnalyzerProvider?: "openai";
+            /**
+             * @description READ-ONLY model id paired with `resolvedAnalyzerProvider`.
+             *     Omitted when no server-level analyzer override is active.
+             */
+            resolvedAnalyzerModel?: string;
+            /**
              * @description Overrides the LOCAL_TTS_URL env var. Re-read on every request
              *     by the sidecar provider + health probe.
              */
@@ -3408,7 +3420,8 @@ export interface components {
         };
         /**
          * @description Partial update payload. Read-only fields (apiKeyStatus,
-         *     workspaceRoot, workspaceSource) are ignored. Any `geminiApiKey`-
+         *     workspaceRoot, workspaceSource, resolvedAnalyzerProvider,
+         *     resolvedAnalyzerModel) are ignored. Any `geminiApiKey`-
          *     shaped field is dropped — the API key only lives in server/.env.
          */
         UserSettingsPatch: {

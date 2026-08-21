@@ -43,6 +43,33 @@ with real screenshots.
 - Installing from the release zip? See [INSTALL.md](./INSTALL.md).
 - Release history: [RELEASE_NOTES.md](./RELEASE_NOTES.md).
 
+## Docker (Linux)
+
+The container keeps the web server and Python voice sidecar together so the
+Node server remains the sidecar supervisor. Copy `.env.docker.example` to
+`.env`, set the analyzer endpoint/model and existing Hugging Face cache, then
+start the NVIDIA image with one command:
+
+```bash
+cp .env.docker.example .env
+docker compose up --build -d
+```
+
+Open <http://127.0.0.1:8080/>. Books, settings, logs, and model caches persist
+under the configured data/workspace paths. Point `CASTWRIGHT_WORKSPACE_DIR` at
+an existing native workspace to reuse books and designed voices in place.
+Point `CASTWRIGHT_SETTINGS_DIR` at the native `~/.castwright` directory to keep
+account and model preferences.
+Hugging Face weights are mounted from
+`CASTWRIGHT_HF_CACHE_DIR`, so rebuilding the image neither copies nor downloads
+them. `.env.docker.example` selects `compose.nvidia.yaml` through `COMPOSE_FILE`;
+remove that line to use the portable CPU profile instead.
+
+The published port binds host loopback by default. Change
+`CASTWRIGHT_BIND_ADDRESS` only when a trusted reverse proxy or VPN supplies the
+network exposure policy. See [INSTALL.md](./INSTALL.md#install--docker-linux)
+for configuration and ownership details.
+
 ## License
 
 Castwright is **source-available — not OSI open source**. The code is licensed

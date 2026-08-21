@@ -151,6 +151,49 @@ async function renderViewWaitingForAnalysis() {
 }
 
 describe('AnalysingView — live ticker (regression for stuck-chapter screenshot bug)', () => {
+  it('treats the resolved OpenAI-compatible provider as cloud even when both saved and resolved models contain colons', async () => {
+    const store = configureStore({
+      reducer: {
+        ui: uiSlice.reducer,
+        cast: castSlice.reducer,
+        analysis: analysisSlice.reducer,
+        account: accountSlice.reducer,
+        bookMeta: bookMetaSlice.reducer,
+        notifications: notificationsSlice.reducer,
+      },
+    });
+    store.dispatch({
+      type: 'account/fetch/fulfilled',
+      payload: {
+        ...store.getState().account,
+        resolvedAnalyzerProvider: 'openai',
+        resolvedAnalyzerModel: 'vendor/model:latest',
+      },
+    });
+
+    render(
+      <Provider store={store}>
+        <AnalysingView
+          manuscriptId="m1"
+          title="OpenAI run"
+          wordCount={100}
+          model="qwen3.5:4b"
+          onComplete={() => {}}
+        />
+      </Provider>,
+    );
+
+    const startBtn = await screen.findByRole('button', { name: /start analysis/i });
+    expect(startBtn).toBeEnabled();
+    expect(getOllamaHealthSpy).not.toHaveBeenCalled();
+    expect(loadAnalyzerSpy).not.toHaveBeenCalled();
+
+    await act(async () => fireEvent.click(startBtn));
+    await waitFor(() => expect(capturedOpts).toBeDefined());
+    expect(capturedOpts?.model).toBe('qwen3.5:4b');
+    expect(getOllamaHealthSpy).not.toHaveBeenCalled();
+  });
+
   it('renders one row per in-flight chapter so a slow chapter does not hide concurrent progress', async () => {
     await renderViewWaitingForAnalysis();
 

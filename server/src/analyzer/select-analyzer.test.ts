@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { selectAnalyzer, FallbackAnalyzer } from './index.js';
 import { OllamaAnalyzer } from './ollama.js';
 import { GeminiAnalyzer } from './gemini.js';
+import { OpenAICompatibleAnalyzer } from './openai-compatible.js';
 import {
   selectAnalyzerForPhase,
   isPerPhaseModelSelectionActive,
@@ -32,6 +33,10 @@ beforeEach(() => {
   _resetUserSettingsCache();
   /* Clear analysis-related env so each case sets only what it needs. */
   delete process.env.ANALYZER;
+  delete process.env.ANALYZER_PROVIDER;
+  delete process.env.OPENAI_BASE_URL;
+  delete process.env.OPENAI_MODEL;
+  delete process.env.OPENAI_API_KEY;
   delete process.env.GEMINI_API_KEY;
   delete process.env.GEMINI_MODEL;
   delete process.env.OLLAMA_URL;
@@ -47,6 +52,53 @@ afterEach(() => {
 });
 
 describe('selectAnalyzer dispatch', () => {
+  it('ANALYZER_PROVIDER=openai wins before saved engine and per-request model inference', () => {
+    process.env.ANALYZER_PROVIDER = 'openai';
+    process.env.OPENAI_BASE_URL = 'http://model-host:8000/v1';
+    process.env.OPENAI_MODEL = 'served-model';
+    _setUserSettingsCacheForTest({ analysisEngine: 'local' });
+
+    const s = selectAnalyzer({ model: 'gemini-2.5-flash' });
+    expect(s.analyzer).toBeInstanceOf(OpenAICompatibleAnalyzer);
+    expect(s).toMatchObject({
+      engine: 'gemini',
+      model: 'served-model',
+      fallbackModel: null,
+    });
+  });
+
+  it('ANALYZER_PROVIDER=openai also wins over per-phase model env overrides', () => {
+    process.env.ANALYZER_PROVIDER = 'openai';
+    process.env.OPENAI_BASE_URL = 'http://model-host:8000/v1';
+    process.env.OPENAI_MODEL = 'served-model';
+    process.env.ANALYZER_PHASE0_MODEL = 'qwen3.5:9b';
+
+    const s = selectAnalyzerForPhase({ phase: 'phase0', model: 'gemini-2.5-flash' });
+    expect(s.analyzer).toBeInstanceOf(OpenAICompatibleAnalyzer);
+    expect(s.model).toBe('served-model');
+  });
+
+  it.each([
+    ['OPENAI_BASE_URL', { OPENAI_MODEL: 'served-model' }],
+    ['OPENAI_MODEL', { OPENAI_BASE_URL: 'http://model-host:8000/v1' }],
+  ])('requires nonblank %s for ANALYZER_PROVIDER=openai', (name, values) => {
+    process.env.ANALYZER_PROVIDER = 'openai';
+    Object.assign(process.env, values);
+    expect(() => selectAnalyzer()).toThrow(new RegExp(`${name} is required`));
+  });
+
+  it('rejects an unknown nonblank ANALYZER_PROVIDER clearly', () => {
+    process.env.ANALYZER_PROVIDER = 'mystery-provider';
+    expect(() => selectAnalyzer()).toThrow(/Unknown ANALYZER_PROVIDER.*mystery-provider/);
+  });
+
+  it('a blank ANALYZER_PROVIDER preserves existing local selection', () => {
+    process.env.ANALYZER_PROVIDER = '   ';
+    const s = selectAnalyzer();
+    expect(s.engine).toBe('local');
+    expect(s.analyzer).toBeInstanceOf(OllamaAnalyzer);
+  });
+
   it('local + Gemini key → FallbackAnalyzer wrapping Ollama with Gemini fallback', () => {
     /* Engine=local is the cold-cache default now (ANALYZER env retired). */
     process.env.GEMINI_API_KEY = 'test-key';

@@ -1,0 +1,23 @@
+services:
+  castwright:
+    build:
+      args:
+        ACCELERATOR: nvidia
+        RUNTIME_BASE: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+    environment:
+      ACCELERATOR: nvidia
+    volumes:
+      # Reuse the host's existing Hugging Face model cache. Keeping this as an
+      # NVIDIA override lets the portable CPU compose retain its self-contained
+      # ./data default.
+      - type: bind
+        source: ${CASTWRIGHT_HF_CACHE_DIR:?set CASTWRIGHT_HF_CACHE_DIR to the existing Hugging Face cache}
+        target: /data/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu

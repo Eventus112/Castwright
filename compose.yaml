@@ -1,0 +1,76 @@
+name: castwright
+
+services:
+  castwright:
+    image: ${CASTWRIGHT_IMAGE:-castwright:local}
+    build:
+      context: .
+      args:
+        ACCELERATOR: cpu
+        RUNTIME_BASE: ubuntu:24.04
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 3m30s
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - '${CASTWRIGHT_BIND_ADDRESS:-127.0.0.1}:${CASTWRIGHT_PORT:-8080}:8080'
+    environment:
+      ACCELERATOR: cpu
+      ANALYZER_PROVIDER: ${ANALYZER_PROVIDER:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      NODE_ENV: production
+      LAN_HTTPS: '0'
+      BIND_HOST: 0.0.0.0
+      PORT: '8080'
+      PRELOAD_COQUI: ${PRELOAD_COQUI:-0}
+      PRELOAD_KOKORO: ${PRELOAD_KOKORO:-0}
+      PRELOAD_QWEN: ${PRELOAD_QWEN:-0}
+      PRELOAD_QWEN_BASE17: ${PRELOAD_QWEN_BASE17:-0}
+      SIDECAR_VENV_DIR: /opt/castwright/sidecar-venv
+      WORKSPACE_DIR: /data/workspace
+      USER_SETTINGS_FILE: /data/settings/user-settings.json
+      APP_LOG_DIR: /data/logs
+      APP_RUN_DIR: /data/run
+      HF_HOME: /data/cache/huggingface
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      XDG_CACHE_HOME: /data/cache
+      XDG_DATA_HOME: /data/share
+      TORCH_HOME: /data/cache/torch
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - type: bind
+        source: ${CASTWRIGHT_DATA_DIR:-./data}
+        target: /data
+      - type: bind
+        source: ${CASTWRIGHT_WORKSPACE_DIR:-./data/workspace}
+        target: /data/workspace
+      - type: bind
+        source: ${CASTWRIGHT_SETTINGS_DIR:-./data/settings}
+        target: /data/settings
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5

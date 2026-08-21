@@ -2,8 +2,9 @@
 
    The frontend's Account view round-trips through here. GET returns the
    on-disk user-settings.json merged with env-derived read-only fields
-   (apiKeyStatus, workspaceRoot, workspaceSource). PUT validates a partial
-   patch, strips secret-shaped keys, persists, and returns the new shape.
+   (apiKeyStatus, workspaceRoot/source, and safe resolved analyzer metadata).
+   PUT validates a partial patch, strips secret-shaped keys, persists, and
+   returns the new shape.
 
    Plan 49 — the Gemini API key is now UI-managed via a dedicated
    PUT /api/user/settings/gemini-key endpoint (kept off the general PUT
@@ -26,6 +27,7 @@ import {
   type UserSettings,
 } from '../workspace/user-settings.js';
 import { WORKSPACE_ROOT, WORKSPACE_SOURCE } from '../workspace/paths.js';
+import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
 
 export const userSettingsRouter = Router();
 
@@ -39,12 +41,17 @@ interface UserSettingsResponse extends Omit<UserSettings, 'geminiApiKey'> {
      session engine from this so a fresh box with Qwen installed defaults to
      Qwen, while the stored key stays Kokoro until the user explicitly picks. */
   resolvedTtsModelKey: UserSettings['defaultTtsModelKey'];
+  /* Safe visibility for a server-level analyzer override. Endpoint and API
+     key deliberately stay inside the analyzer module. */
+  resolvedAnalyzerProvider?: 'openai';
+  resolvedAnalyzerModel?: string;
 }
 
 function envDerived(settings: UserSettings): UserSettingsResponse {
   /* Drop the plaintext key — frontend only ever sees apiKeyStatus. */
   const rest = { ...settings } as Partial<UserSettings>;
   delete rest.geminiApiKey;
+  const openAI = resolveOpenAICompatibleConfigFromEnv();
   return {
     ...(rest as Omit<UserSettings, 'geminiApiKey'>),
     apiKeyStatus: getResolvedGeminiApiKey() ? 'set' : 'unset',
@@ -60,6 +67,12 @@ function envDerived(settings: UserSettings): UserSettingsResponse {
        stored `defaultTtsModelKey` above is left untouched so the Account
        picker shows what's saved and a no-op round-trip can't pollute it. */
     resolvedTtsModelKey: getResolvedTtsModelKey(),
+    ...(openAI.enabled
+      ? {
+          resolvedAnalyzerProvider: 'openai' as const,
+          resolvedAnalyzerModel: openAI.model,
+        }
+      : {}),
     workspaceRoot: WORKSPACE_ROOT,
     workspaceSource: WORKSPACE_SOURCE,
   };

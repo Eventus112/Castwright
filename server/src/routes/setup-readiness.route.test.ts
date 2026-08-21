@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +39,16 @@ afterAll(() => {
   delete process.env.VOICE_SAMPLE_AUDIO_DIR;
 });
 
+function clearOpenAIEnv() {
+  delete process.env.ANALYZER_PROVIDER;
+  delete process.env.OPENAI_BASE_URL;
+  delete process.env.OPENAI_MODEL;
+  delete process.env.OPENAI_API_KEY;
+}
+
+beforeEach(clearOpenAIEnv);
+afterEach(clearOpenAIEnv);
+
 describe('GET /api/setup/readiness route (integration — live probe)', () => {
   it('returns 200 with the readiness shape even when the sidecar is down', async () => {
     const app = express();
@@ -71,6 +81,23 @@ describe('POST /api/setup/smoke', () => {
     expect(res.body.ok).toBe(true);
     expect(typeof res.body.url).toBe('string');
     expect(typeof res.body.analyzerOk).toBe('boolean');
+  });
+
+  it('reports a no-key OpenAI-compatible analyzer as configured and names its colon-bearing model', async () => {
+    process.env.ANALYZER_PROVIDER = 'openai';
+    process.env.OPENAI_BASE_URL = 'http://openai.internal:8000/v1';
+    process.env.OPENAI_MODEL = 'vendor/model:latest';
+    delete process.env.OPENAI_API_KEY;
+
+    const app = express();
+    app.use('/api/setup', setupReadinessRouter);
+    const res = await request(app).post('/api/setup/smoke');
+
+    expect(res.status).toBe(200);
+    expect(res.body.analyzerOk).toBe(true);
+    expect(res.body.analyzerDetail).toBe(
+      'OpenAI-compatible configured · vendor/model:latest',
+    );
   });
 
   it('returns 200 { ok: false, stage: "synth", error: string } when synth rejects — never 500', async () => {

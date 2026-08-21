@@ -31,6 +31,7 @@ import {
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { resolveOpenAICompatibleConfigFromEnv } from '../analyzer/openai-compatible.js';
 
 /* Repo root computed locally, exactly as models-inventory.ts does (this file
    is also under server/src/routes/, so '..','..','..' lands on the repo root).
@@ -147,22 +148,28 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
   } = probeFfmpeg();
   const ffmpeg = diagnoseFfmpeg({ ffmpegPresent, ffprobePresent, version, belowFloor, minimum });
 
-  const engine = getResolvedAnalysisEngine();
-  const geminiKeySet = getResolvedGeminiApiKey() != null;
-  /* Probe Ollama even when engine==='gemini' — the backup label needs the
-     local-availability facts regardless of the active engine. Bounded by the
-     2s probe budget in probeOllamaHealth(). */
-  const ollama = await probeOllamaHealth();
-  const analyzer = diagnoseAnalyzer({
-    engine,
-    ollamaReachable: ollama.status === 'reachable',
-    ollamaError: ollama.error ?? null,
-    modelPulled: ollama.modelPulled ?? false,
-    anyAnalyzerModelPulled: anyAnalyzerModelPulled(ollama.models ?? [], ollama.pullable ?? []),
-    expectedModel: ollama.expectedModel ?? getResolvedOllamaModel(),
-    pullable: ollama.pullable ?? [],
-    geminiKeySet,
-  });
+  const openAI = resolveOpenAICompatibleConfigFromEnv();
+  let analyzer: BlockerDiagnosis;
+  if (openAI.enabled) {
+    analyzer = diagnoseAnalyzer({ provider: 'openai', model: openAI.model });
+  } else {
+    const engine = getResolvedAnalysisEngine();
+    const geminiKeySet = getResolvedGeminiApiKey() != null;
+    /* Probe Ollama even when engine==='gemini' — the backup label needs the
+       local-availability facts regardless of the active engine. Bounded by the
+       2s probe budget in probeOllamaHealth(). */
+    const ollama = await probeOllamaHealth();
+    analyzer = diagnoseAnalyzer({
+      engine,
+      ollamaReachable: ollama.status === 'reachable',
+      ollamaError: ollama.error ?? null,
+      modelPulled: ollama.modelPulled ?? false,
+      anyAnalyzerModelPulled: anyAnalyzerModelPulled(ollama.models ?? [], ollama.pullable ?? []),
+      expectedModel: ollama.expectedModel ?? getResolvedOllamaModel(),
+      pullable: ollama.pullable ?? [],
+      geminiKeySet,
+    });
+  }
 
   res.json(
     buildSetupReadiness({
@@ -176,9 +183,11 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
 
 /* POST /api/setup/smoke — Tier-1 light smoke test (fs-21 wave 3).
    Synthesises a fixed sentence via Kokoro (the always-present fallback),
-   encodes to MP3, writes to the voice-sample cache dir, and pings the
-   analyzer. Returns ok:false (never 500) on sidecar/ffmpeg failure so the
-   setup UI can surface a user-readable diagnosis rather than an error page. */
+   encodes to MP3, writes to the voice-sample cache dir, and checks analyzer
+   readiness/configuration. OpenAI-compatible connectivity is left to a real
+   analysis because a portable model-list probe does not exist. Returns
+   ok:false (never 500) on sidecar/ffmpeg failure so the setup UI can surface
+   a user-readable diagnosis rather than an error page. */
 setupReadinessRouter.post('/smoke', async (_req: Request, res: Response) => {
   const modelKey = 'kokoro-v1';
   const voiceName = 'af_heart';
@@ -201,7 +210,11 @@ setupReadinessRouter.post('/smoke', async (_req: Request, res: Response) => {
   let analyzerOk = false;
   let analyzerDetail = '';
   try {
-    if (getResolvedAnalysisEngine() === 'gemini') {
+    const openAI = resolveOpenAICompatibleConfigFromEnv();
+    if (openAI.enabled) {
+      analyzerOk = true;
+      analyzerDetail = `OpenAI-compatible configured · ${openAI.model}`;
+    } else if (getResolvedAnalysisEngine() === 'gemini') {
       analyzerOk = getResolvedGeminiApiKey() != null;
       analyzerDetail = analyzerOk ? 'API key set' : 'no key';
     } else {

@@ -161,6 +161,83 @@ To stop: `npm run stop:prod`.
 
 ---
 
+## Install — Docker (Linux)
+
+Docker packages Node 24, Python 3.12, ffmpeg 6+, and the sidecar environment
+into one image. Model weights remain host-mounted data. The Node server still starts and
+supervises the Python sidecar as its child; Compose does not split them into
+independent services.
+
+Prerequisites: Docker Engine with the Compose plugin and, for the example's
+default NVIDIA profile, NVIDIA Container Toolkit. Verify a CUDA container can
+see the GPU before starting Castwright.
+
+```bash
+cp .env.docker.example .env
+# Edit .env: set the endpoint/model and CASTWRIGHT_HF_CACHE_DIR.
+# OPENAI_API_KEY is optional for a local unauthenticated endpoint.
+docker compose up --build -d
+docker compose ps
+```
+
+Open <http://127.0.0.1:8080/>. The healthcheck probes `/api/health`; logs are
+available with `docker compose logs -f castwright` and under the persistent data
+directory.
+
+`.env.docker.example` sets `COMPOSE_FILE=compose.yaml:compose.nvidia.yaml`, so
+the command above builds and requests the NVIDIA GPU without extra flags. For
+a CPU-only Linux host, remove that `COMPOSE_FILE` line; the base compose file is
+the portable CPU fallback.
+
+```bash
+docker compose up --build -d
+```
+
+`CASTWRIGHT_DATA_DIR` defaults to `./data` and contains run state, logs, audio,
+and analyzer handoff records. `CASTWRIGHT_WORKSPACE_DIR`
+defaults to `./data/workspace`; set it to the native installation's existing
+`WORKSPACE_DIR` to reuse books, backups, and designed voices without copying.
+`CASTWRIGHT_SETTINGS_DIR` defaults to `./data/settings`; point it at the native
+`~/.castwright` directory to preserve user settings.
+`CASTWRIGHT_HF_CACHE_DIR` points
+at the existing host Hugging Face cache and is mounted directly at the path used
+by the sidecar. Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` to make an
+already-populated deployment fail instead of downloading missing weights. Back
+up application data before migrating machines; the image itself is replaceable.
+
+Whisper is included in both images, while Qwen is included only in the NVIDIA
+image/profile; model weights are not baked into either image. The optional Coqui
+installer can add its Python package to the running image's writable sidecar
+environment, while its much larger model
+weights stay under `/data/share`. Replacing or rebuilding the image therefore
+requires re-running the Coqui install action, but reuses the persisted weights
+instead of downloading them again. The image exposes its sidecar environment at
+both `SIDECAR_VENV_DIR` and the legacy `.venv` path so Model Manager detection
+and installers agree.
+
+`PUID` and `PGID` default to `1000`. Set them to the owner of
+`CASTWRIGHT_DATA_DIR` so newly-created files are directly manageable on the
+host (for example, `PUID=$(id -u)` and `PGID=$(id -g)` in `.env`). Startup only
+adjusts the managed directory entries and never recursively changes existing
+book ownership.
+
+The web port publishes on `127.0.0.1` by default. Do not change
+`CASTWRIGHT_BIND_ADDRESS` to `0.0.0.0` unless access is controlled by a trusted
+reverse proxy, firewall policy, or VPN such as Tailscale. Inside the container,
+the server intentionally binds `0.0.0.0:8080`; `LAN_HTTPS` stays disabled so
+TLS termination remains outside the container.
+
+An analyzer on the Docker host is reachable through
+`http://host.docker.internal:<port>/v1`. OpenAI-compatible values are passed at
+container runtime from `.env`; they are not baked into image layers. Stop the
+deployment without deleting data with:
+
+```bash
+docker compose down
+```
+
+---
+
 ## Try the demo book
 
 The app ships with a generate-able demo — **The Coalfall Commission** (an original
@@ -415,4 +492,3 @@ install folder) and carry over automatically; copy your old `server/.env` into
 ### Manual fallback (any version)
 
 The in-app flow is just orchestration — you can always swap by hand: `npm run stop:prod`, extract the new release into a new `releases/vX.Y.Z/`, set `.current-version`, `npm ci && npm --prefix server ci`, then `node launch.mjs`. Your `workspace/`, `venv/`, and `models/` are untouched.
-
