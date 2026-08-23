@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Castwright TCP relay — parks on the web container's OWN loopback and
+# forwards the app's hardcoded localhost defaults to the real targets.
+#
+# Why this exists: the server resolves sidecarUrl/ollamaUrl to factory
+# localhost defaults (localhost:9000 / localhost:11434) — a missing
+# user-settings.json is seeded in-process from defaults at boot, which
+# SHADOWS the LOCAL_TTS_URL / OLLAMA_URL env vars. Rather than fight that
+# config (or touch the source), we relay those localhost ports outward.
+#
+#   localhost:11434 -> OLLAMA_UPSTREAM  (default 100.97.134.52:11435)
+#   localhost:9000  -> SIDECAR_UPSTREAM (default tts:9000)
+#
+# Runs with network_mode: service:castwright (see docker-compose.yml) so its
+# loopback IS the web container's loopback. Zero changes to the Castwright
+# source tree.
+
+FROM alpine:3.20
+
+RUN apk add --no-cache socat
+
+ENV OLLAMA_LOCAL_PORT=11434 \
+    OLLAMA_UPSTREAM=100.97.134.52:11435 \
+    SIDECAR_LOCAL_PORT=9000 \
+    SIDECAR_UPSTREAM=tts:9000
+
+# fork = one relay per connection (concurrency + SSE/large-binary friendly);
+# reuseaddr = fast rebind across restarts; wait = stay alive while both run.
+# Env vars expand at runtime via sh.
+ENTRYPOINT ["sh", "-c", "socat TCP-LISTEN:${OLLAMA_LOCAL_PORT},fork,reuseaddr TCP:${OLLAMA_UPSTREAM} & socat TCP-LISTEN:${SIDECAR_LOCAL_PORT},fork,reuseaddr TCP:${SIDECAR_UPSTREAM} & wait"]

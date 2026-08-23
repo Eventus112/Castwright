@@ -184,7 +184,7 @@ compute, not Qwen-specific.
    # Floor 2100 MHz, ceiling 3105 MHz (values are this 4070's range —
    # check yours with: nvidia-smi -q -d SUPPORTED_CLOCKS).
    nvidia-smi -lgc 2100,3105
-   # Or pin flat at max:
+   # Or pin flat at max: 
    #   nvidia-smi -lgc 3105,3105
    # Revert to the driver default when done:
    nvidia-smi -rgc

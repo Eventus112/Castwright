@@ -9229,10 +9229,11 @@ def _engine_actual_card(engine: Any) -> Optional[dict]:
     # actual device: prefer the loaded torch module's real device; fall back to the string attr
     family = index = None
     try:
-        params = getattr(model, "parameters", None)
+        target_mod = getattr(model, "model", model)
+        params = getattr(target_mod, "parameters", None)
         if callable(params):
             dev = next(params()).device
-            family, index = ("cuda" if dev.type == "cuda" else dev.type), dev.index
+            family, index = ("cuda" if dev.type == "cuda" else dev.type), (dev.index if dev.index is not None else (0 if dev.type == "cuda" else None))
     except Exception:
         pass
     if family is None:  # ORT/CT2 or no params(): use the string attr (family only)

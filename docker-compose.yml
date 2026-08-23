@@ -1,0 +1,179 @@
+# docker compose -f /home/bzbz/model_project/Castwright/docker-compose.yml up -d --force-recreate
+# Castwright web server + local TTS sidecar (this machine is the GPU box).
+#
+# Reachable over Tailscale at http://<tailnet-ip>:8080. Run this on the
+# machine whose Tailscale IP you want to hit (`tailscale ip -4`).
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#   curl -s localhost:8080/api/health
+#
+# Local TTS wiring: the sidecar runs in the `tts` service below, on this
+# machine's GPU. The app's sidecar-URL guard (srv-21) rejects raw
+# 100.64.0.0/10 Tailscale IPs, so the sidecar is addressed by the bare
+# hostname `tts` — compose DNS resolves it to the sidecar container (no
+# extra_hosts needed). It listens on 0.0.0.0:9000 inside its container, so
+# tailnet peers can also hit it directly at http://<tailnet-ip>:9000.
+
+services:
+  castwright:
+    build: .
+    image: castwright-web:latest
+    container_name: castwright
+    ports:
+      - "8090:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      # Plain HTTP on all interfaces (see Dockerfile for why both are needed).
+      LAN_HTTPS: "0"
+      BIND_HOST: 0.0.0.0
+      WORKSPACE_DIR: /workspace
+      # Web-UI settings + prompt forks default to ~/.castwright INSIDE the
+      # container (ephemeral layer, wiped on every recreate/rebuild) — pin
+      # both into the persisted volume so they survive.
+      USER_SETTINGS_FILE: /workspace/user-settings.json
+      CASTWRIGHT_PROMPTS_DIR: /workspace/prompts
+      # No Python runtime in this image; the sidecar runs in the `tts`
+      # service below — do not try to spawn a local one.
+      DISABLE_AUTOSTART_SIDECAR: "1"
+      # Compose DNS resolves `tts` to the sidecar container. Change the port
+      # here if the sidecar doesn't use 9000.
+      LOCAL_TTS_URL: http://tts:9000
+      # Qwen batch packing (plans 136/137): hard width cap 32 -> 64. VRAM stays
+      # governed by the token budget below, so this mostly lets short dialogue
+      # lines pack wider per forward (less dispatch overhead). Upstream live-
+      # tested at 64 (plan 137).
+      #QWEN_BATCH_SIZE: "64"
+      # 0.6B-tier per-batch token budget: back to the shipped default 3600
+      # (was 4800 — too wide for this card once the 1.7B tier entered the mix).
+     # QWEN_BATCH_TOKEN_BUDGET: "3600"
+      # 1.7B Quality-tier batch caps — read by THIS (web) server's packer, not
+      # the sidecar. The defaults (width 32 / budget 3600) packed a whole
+      # 20-line chapter into ONE 1.7B forward -> CUDA OOM on this 12 GB card
+      # (10.98 GiB in use + 1.86 GiB alloc -> cuda-poisoned recycle). Pinned
+      # to the small-card values documented in synthesise-chapter.ts.
+      QWEN_BATCH_SIZE_17B: "8"
+      QWEN_BATCH_TOKEN_BUDGET_17B: "1200"
+      # Persona generation engine (voice-style personas for Qwen voice design):
+      # pin LOCAL Ollama instead of the gemini default. The UI override
+      # (analyzer.personaGeneration.engine) resolves env > override > default,
+      # so a missing/stale override silently falls back to gemini and fails
+      # with "GEMINI_API_KEY is required" — env pins the no-key setup.
+      # Model inherits the analyzer's resolved Ollama tag (no extra download).
+      PERSONA_GEN_ENGINE: "local"
+      # Analysis -> remote llama-swap gateway (100.97.134.52:11435): keep K=1.
+      # The gateway admits ONE inference at a time and EXPIRES queued requests
+      # ("gateway stream error: inference request expired while waiting for
+      # admission"). The shipped default K=2 fired two chapter attributions in
+      # parallel; the second sat in the queue behind the first (a 27B pass over
+      # a ~9k-char chapter runs longer than the gateway's queue TTL) and died,
+      # failing the chapter. K=1 serialises OUR requests so nothing queues
+      # behind itself. Raise back to 2 only if the gateway gains
+      # OLLAMA_NUM_PARALLEL >= 2.
+      ANALYZER_OLLAMA_CONCURRENCY: "1"
+    volumes:
+      # Books, designed voices, web settings (USER_SETTINGS_FILE) and prompt
+      # forks (CASTWRIGHT_PROMPTS_DIR) — survives image rebuilds.
+      - ./castwright-workspace:/workspace
+      # Read-only view of the host Hugging Face cache. The Model Manager's disk
+      # probes (server/src/tts/model-paths.ts) run IN THIS container and resolve
+      # the hub cache to /root/.cache/huggingface/hub — without this mount every
+      # HF-backed row (Qwen base/base17/VoiceDesign, Whisper) reads "not
+      # installed" even though the weights sit in the `tts` container's mount.
+      # Detection-only: the web image never writes here, so Remove on these rows
+      # fails loudly (EROFS) instead of deleting weights out from under the
+      # sidecar.
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # TTS sidecar — Python 3.12 + torch cu128 + Qwen/Kokoro engines
+  # (Dockerfile.tts). Code is bind-mounted live, so updates take effect on
+  # restart without a rebuild; the venv is baked into the image at /opt/venv
+  # (SIDECAR_VENV_DIR). Qwen3-TTS weights come from the host HuggingFace
+  # cache (already downloaded 2026-08-21 — nothing is re-fetched).
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
+    image: castwright-tts:latest
+    container_name: castwright-tts
+    ports:
+      - "9000:9000"
+    environment:
+      LOCAL_TTS_HOST: "0.0.0.0"
+      SIDECAR_VENV_DIR: /opt/venv
+      # Load the Qwen 0.6B-Base at boot instead of on first synth, so the
+      # ~30-60 s cold start (weight read + CUDA init) is paid once at
+      # container start, not on the first sentence of a chapter.
+      PRELOAD_QWEN: "1"
+      # side-25: run the Code2Wav codec decode on the model's own device
+      # (cuda here) instead of CPU. With the codec on CPU the GPU idles
+      # between token generation and waveform decode — the main reason
+      # sustained GPU utilisation looked near zero during generation.
+      QWEN_CODEC_DEVICE: auto
+      # One-time torch.compile of the codec decoder (extra load-time cost,
+      # faster steady-state decode). Left OFF until validated on this box.
+      # QWEN_COMPILE_CODEC: "1"
+      # Move the per-sentence QA transcription (faster-whisper base, int8,
+      # ~150-400 MB VRAM) from CPU to GPU. Default is CPU-first so the QA
+      # pass costs zero VRAM; here the card has headroom and the CPU pass
+      # left the GPU idle between synth batches. Gated by the server's
+      # weighted VRAM semaphore; idle-evicted after 120 s (ASR_IDLE_TTL).
+      ASR_DEVICE: cuda
+      # Designed-voice embedding cache MUST live in the SHARED workspace tree
+      # (the same <workspace>/voices/qwen the web container's guard and
+      # promote/discard routes read/write — paths.ts qwenVoicesDir()). Without
+      # it the sidecar silently falls back to its own code dir
+      # (server/tts-sidecar/voices/qwen) and every designed voice reads as
+      # "manifest: missing" to the server. Mirrors spawn-sidecar.ts (local
+      # spawn mode); the XTTS sibling is kept in lockstep for cloned voices.
+      QWEN_VOICES_DIR: /workspace/voices/qwen
+      XTTS_VOICES_DIR: /workspace/voices/xtts
+    volumes:
+      # Live sidecar code (main.py, start.sh, …).
+      - ./server/tts-sidecar:/app/server/tts-sidecar
+      # Shared workspace (designed-voice .pt/.json/.wav + clone latents) — rw
+      # because the sidecar caches artifacts here. Same tree the castwright
+      # service mounts at /workspace.
+      - ./castwright-workspace:/workspace
+      # Qwen3-TTS weights — shared with the host so both see the same cache.
+      # ${HOME} is interpolated by compose from the invoking user's env, so
+      # this file stays portable across machines.
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # TCP relay parked on the web container's OWN loopback (it shares
+  # castwright's network namespace). The app resolves its sidecar/Ollama URLs
+  # to factory localhost defaults (localhost:9000 / localhost:11434) — a
+  # missing user-settings.json is seeded from defaults at boot, which shadows
+  # the LOCAL_TTS_URL / OLLAMA_URL env vars. Rather than fight that config,
+  # this relay forwards those localhost ports to the real targets. No changes
+  # to the Castwright source tree. See Dockerfile.proxy.
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: castwright-proxy:latest
+    container_name: castwright-proxy
+    network_mode: "service:castwright"
+    environment:
+      # Remote Ollama daemon (over the tailnet).
+      OLLAMA_UPSTREAM: "100.97.134.52:11435"
+      # Local TTS sidecar. `tts` = the compose service above (resolved via the
+      # shared network's DNS). If the sidecar runs on the HOST instead of as a
+      # container, point this at the host (e.g. "host.docker.internal:9000"
+      # with an extra_hosts entry, or the host's LAN IP).
+      SIDECAR_UPSTREAM: "tts:9000"
+    depends_on:
+      - castwright
+    restart: unless-stopped

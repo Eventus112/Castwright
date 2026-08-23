@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# Castwright TTS sidecar — Python 3.12 + torch (cu128) + voice engines.
+#
+# Companion to the root Dockerfile (web server — NO Python runtime). The
+# sidecar runs in its own container on the GPU box (see the `tts` service in
+# docker-compose.yml). Only the Python environment is baked here; the sidecar
+# CODE is bind-mounted at runtime, so code updates need no rebuild.
+#
+# Install recipe mirrors scripts/bootstrap-venv.mjs for the `nvidia` profile:
+#   1. torch/torchaudio 2.11.0 from the cu128 index BEFORE the overlay —
+#      PyPI's plain pins do not carry the CUDA build we want,
+#   2. requirements/nvidia-cuda.txt (engines; its pinned torch==2.11.0 lines
+#      are then already satisfied by the +cu128 wheels),
+#   3. swap plain onnxruntime -> onnxruntime-gpu (the single enforcement
+#      point for Kokoro's CUDA EP — never kokoro-onnx[gpu]).
+#
+# Model weights are NOT baked in: Qwen3-TTS lives in the host HuggingFace
+# cache, bind-mounted at /root/.cache/huggingface by docker-compose.yml.
+
+FROM python:3.12-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SIDECAR_VENV_DIR=/opt/venv
+
+# libgomp1 — OpenMP runtime for MKL/oneDNN CPU ops (Code2Wav codec decode,
+# faster-whisper ASR). Everything else ships inside the pip wheels.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+
+# Requirements first — the big layer, cached until the pins change.
+COPY server/tts-sidecar/requirements/ /tmp/reqs/
+
+RUN /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install torch==2.11.0 torchaudio==2.11.0 \
+         --index-url https://download.pytorch.org/whl/cu128 \
+    && /opt/venv/bin/pip install -r /tmp/reqs/nvidia-cuda.txt \
+    && /opt/venv/bin/pip uninstall -y onnxruntime \
+    && /opt/venv/bin/pip install 'onnxruntime-gpu>=1.26,<1.27' \
+    && rm -rf /tmp/reqs
+
+WORKDIR /app/server/tts-sidecar
+CMD ["bash", "start.sh"]

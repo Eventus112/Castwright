@@ -1,0 +1,25 @@
+# VCS / editor noise
+.git
+.DS_Store
+
+# Host build artifacts & caches — rebuilt inside the image.
+node_modules
+**/node_modules
+dist
+server/dist
+logs
+.run
+*.log
+
+# Host-local runtime state — never belongs in the image.
+castwright-workspace
+server/.env
+
+# Host-local Python venv — a foreign-platform venv would silently break the
+# sidecar (it probes for bin/python); the image builds its own.
+server/tts-sidecar/.venv
+
+# Test/e2e noise (not needed at runtime)
+e2e
+test-results
+playwright-report

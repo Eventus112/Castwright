@@ -13,7 +13,7 @@ venv_python="$venv_dir/bin/python"
 if [ ! -x "$venv_python" ]; then
   echo "Local TTS sidecar venv not found at $venv_python." >&2
   echo "Run the one-time setup first (see server/tts-sidecar/README.md):" >&2
-  echo "  cd server/tts-sidecar && python3.11 -m venv .venv && ./.venv/bin/python -m pip install -r requirements.txt" >&2
+  echo "  cd server/tts-sidecar && python3.12 -m venv .venv && ./.venv/bin/python -m pip install -r requirements.txt" >&2
   exit 1
 fi
 
@@ -41,7 +41,7 @@ fi
 : "${COQUI_TOS_AGREED:=1}"; export COQUI_TOS_AGREED
 
 port="${LOCAL_TTS_PORT:-9000}"
-bind_host="${LOCAL_TTS_HOST:-127.0.0.1}"
+bind_host="${LOCAL_TTS_HOST:-0.0.0.0}"
 restart_backoff=2
 
 # Supervisor loop. main.py self-exits with one of two recoverable codes:

@@ -1,0 +1,48 @@
+# docker compose -f /home/maxnim/ai/Castwright/docker-compose.yml up -d --force-recreate
+# Castwright web server — TTS lives on another tailnet machine.
+#
+# Reachable over Tailscale at http://<tailnet-ip>:8080. Run this on the
+# machine whose Tailscale IP you want to hit (`tailscale ip -4`).
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#   curl -s localhost:8080/api/health
+#
+# Remote TTS wiring: the app's sidecar-URL guard (srv-21) rejects raw
+# 100.64.0.0/10 Tailscale IPs, so the sidecar is addressed by the bare
+# hostname `tts`, which extra_hosts maps to the remote machine's IP below.
+# On the REMOTE box the sidecar must listen beyond loopback:
+#   LOCAL_TTS_HOST=0.0.0.0 bash server/tts-sidecar/start.sh   (port 9000)
+
+services:
+  castwright:
+    build: .
+    image: castwright-web:latest
+    container_name: castwright
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      # Plain HTTP on all interfaces (see Dockerfile for why both are needed).
+      LAN_HTTPS: "0"
+      BIND_HOST: 0.0.0.0
+      WORKSPACE_DIR: /workspace
+      # Web-UI settings + prompt forks default to ~/.castwright INSIDE the
+      # container (ephemeral layer, wiped on every recreate/rebuild) — pin
+      # both into the persisted volume so they survive.
+      USER_SETTINGS_FILE: /workspace/user-settings.json
+      CASTWRIGHT_PROMPTS_DIR: /workspace/prompts
+      # No local sidecar in this image; talk to the remote one.
+      DISABLE_AUTOSTART_SIDECAR: "1"
+      # Change the port here if your remote sidecar doesn't use 9000.
+      LOCAL_TTS_URL: http://lokalhost:9000
+    #extra_hosts:
+      # <-- your TTS server's Tailscale IP
+     # - tts:100.65.168.90
+    volumes:
+      # Books, designed voices, web settings (USER_SETTINGS_FILE) and prompt
+      # forks (CASTWRIGHT_PROMPTS_DIR) — survives image rebuilds.
+      - ./castwright-workspace:/workspace
+    restart: unless-stopped
+    stop_grace_period: 30s
