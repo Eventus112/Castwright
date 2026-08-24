@@ -46,6 +46,14 @@ def test_health_exposes_kokoro_package_installed(client: TestClient) -> None:
     assert isinstance(body["kokoro_package_installed"], bool)
 
 
+def test_health_exposes_kokoro_weights_present(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr(main, "_kokoro_weights_present", lambda: True)
+    body = client.get("/health").json()
+    assert body["kokoro_weights_present"] is True
+
+
 def test_health_exposes_whisper_package_installed(client: TestClient) -> None:
     """/health body must contain whisper_package_installed (bool)."""
     body = client.get("/health").json()

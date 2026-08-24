@@ -1,4 +1,5 @@
-import importlib, os, sys, types
+import asyncio, importlib, json, os, sys, threading, time, types
+from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 main = importlib.import_module("main")
 
@@ -285,6 +286,709 @@ def test_synthesize_flag_on_fits_proceeds(monkeypatch, synth_client):
     r = synth_client.post("/synthesize", json=_synth_body())
     assert r.status_code == 200
     assert r.content == b"\x00\x00"
+
+
+def test_loaded_qwen_17b_synthesize_admits_without_self_eviction(monkeypatch):
+    """The factual /load -> /synthesize repro keeps the loaded model warm.
+
+    The cold 6144 MB footprint does not fit this simulated card while the
+    resident model is present.  Before the regression fix, admission therefore
+    evicted ``qwen.base17``, admitted against the newly freed VRAM, and made the
+    same request reload the model.  The request still returned 200, masking the
+    churn unless unload/reload are asserted explicitly.
+    """
+
+    class FakeResidentQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = None
+            self.base17_loads = 0
+            self.base17_unloads = 0
+
+        def _ensure_base17_loaded(self, device=None):
+            if self._base17 is None:
+                self._base17 = object()
+                self.base17_loads += 1
+
+        def maybe_free_idle_base17(self, ttl_seconds):
+            if self._base17 is None or self._base17_in_flight.busy:
+                return False
+            self._base17 = None
+            self.base17_unloads += 1
+            return True
+
+        def synthesize(self, model, voice, text, language=None):
+            assert model == "1.7b"
+            assert self._base17_residency_leases == 1
+            self._ensure_base17_loaded()
+            return main.SynthResult(pcm=b"\x00\x00", sample_rate=24000, substituted_from=None)
+
+    qwen = FakeResidentQwen()
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.delitem(main.ENGINES, "kokoro", raising=False)
+    monkeypatch.setenv("SEG_CAPACITY_ADMISSION", "1")
+    monkeypatch.setenv("PRELOAD_QWEN", "0")
+    monkeypatch.setenv("PRELOAD_QWEN_BASE17", "0")
+    monkeypatch.setattr(main._placement, "footprints", main.FootprintTable())
+    monkeypatch.setattr(main._placement, "ledger", main.ReservationLedger())
+    monkeypatch.setattr(
+        main._placement,
+        "probe",
+        lambda: [{
+            "kind": "cuda",
+            "index": 0,
+            "label": "g",
+            "totalMb": 12288,
+            "freeMb": 2000 if qwen._base17 is not None else 9000,
+        }],
+    )
+    main._reset_poison_for_test()
+
+    with TestClient(main.app) as client:
+        loaded = client.post("/load", json={"engine": "qwen", "model": "1.7b"})
+        response = client.post(
+            "/synthesize",
+            json={"engine": "qwen", "model": "1.7b", "voice": "v", "text": "hi"},
+        )
+
+    assert loaded.status_code == 200
+    assert loaded.json() == {"status": "ready"}
+    assert response.status_code == 200
+    assert response.content == b"\x00\x00"
+    assert qwen.base17_loads == 1
+    assert qwen.base17_unloads == 0
+    main._reset_poison_for_test()
+
+
+def test_plain_qwen_17b_lease_closes_admission_to_activity_unload_race(monkeypatch):
+    class FakeQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = object()
+
+        def synthesize(self, model, voice, text, language=None):
+            assert self._base17 is not None
+            assert self._base17_residency_leases == 1
+            with self._base17_activity():
+                return main.SynthResult(
+                    pcm=b"\x00\x00", sample_rate=24000, substituted_from=None
+                )
+
+    qwen = FakeQwen()
+    unload_started = threading.Event()
+    unload_threads = []
+
+    def unload_during_admission():
+        unload_started.set()
+        qwen.unload_base17()
+
+    @asynccontextmanager
+    async def racing_reservation(*args, **kwargs):
+        assert qwen._base17_residency_leases == 1
+        assert qwen.maybe_free_idle_base17(0.0) is False
+        thread = threading.Thread(target=unload_during_admission)
+        unload_threads.append(thread)
+        thread.start()
+        assert unload_started.wait(1.0)
+        thread.join(0.05)
+        assert thread.is_alive()
+        assert qwen._base17 is not None
+        yield {"device": "cuda:0"}
+
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.delitem(main.ENGINES, "kokoro", raising=False)
+    monkeypatch.setenv("SEG_CAPACITY_ADMISSION", "1")
+    monkeypatch.setenv("PRELOAD_QWEN", "0")
+    monkeypatch.setenv("PRELOAD_QWEN_BASE17", "0")
+    monkeypatch.setattr(main._placement, "reservation", racing_reservation)
+    monkeypatch.setattr(main, "_reclaim_host_and_vram", lambda: None)
+    main._reset_poison_for_test()
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/synthesize",
+            json={"engine": "qwen", "model": "1.7b", "voice": "v", "text": "hi"},
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"\x00\x00"
+    assert len(unload_threads) == 1
+    unload_threads[0].join(1.0)
+    assert not unload_threads[0].is_alive()
+    assert qwen._base17 is None
+    main._reset_poison_for_test()
+
+
+def test_base17_lease_wait_keeps_health_and_event_loop_responsive(monkeypatch):
+    qwen = main.QwenEngine()
+    qwen._device = "cuda:0"
+    qwen._base17 = object()
+    events = []
+
+    with qwen._base17_lease_cv:
+        qwen._base17_unloading = True
+
+    def finish_unload():
+        time.sleep(0.15)
+        events.append("unload-finished")
+        with qwen._base17_lease_cv:
+            qwen._base17_unloading = False
+            qwen._base17_lease_cv.notify_all()
+
+    thread = threading.Thread(target=finish_unload)
+    thread.start()
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.delitem(main.ENGINES, "kokoro", raising=False)
+
+    async def body():
+        async def wait_for_lease():
+            async with qwen._base17_residency_lease():
+                events.append("lease-entered")
+
+        lease_task = asyncio.create_task(wait_for_lease())
+        await asyncio.sleep(0.02)
+        health = main.health()
+        events.append("health-returned")
+        assert health["ok"] is True
+        await lease_task
+
+    asyncio.run(body())
+    thread.join(1.0)
+    assert events.index("health-returned") < events.index("unload-finished")
+    assert events[-1] == "lease-entered"
+
+
+def test_base17_unload_writer_excludes_new_leases_while_waiting_and_reclaiming(
+    monkeypatch,
+):
+    qwen = main.QwenEngine()
+    qwen._base17 = object()
+    assert qwen._try_acquire_base17_residency_lease() == "leased"
+
+    reclaim_started = threading.Event()
+    reclaim_release = threading.Event()
+
+    def blocking_reclaim():
+        reclaim_started.set()
+        assert reclaim_release.wait(1.0)
+
+    monkeypatch.setattr(main, "_reclaim_host_and_vram", blocking_reclaim)
+    unload_thread = threading.Thread(target=qwen.unload_base17)
+    unload_thread.start()
+
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        with qwen._base17_lease_cv:
+            if qwen._base17_unloading:
+                break
+        time.sleep(0.001)
+    else:
+        pytest.fail("unloader did not close new Base17 leases")
+
+    with qwen._base17_unload_guard(wait=False) as allowed:
+        assert allowed is False
+
+    def forbidden_to_thread(*args, **kwargs):
+        raise AssertionError("Base17 lease wait must not consume an executor thread")
+
+    monkeypatch.setattr(asyncio, "to_thread", forbidden_to_thread)
+
+    async def exercise_burst_waiters():
+        async def acquire_after_unload():
+            async with qwen._base17_residency_lease() as leased:
+                return leased
+
+        waiters = [asyncio.create_task(acquire_after_unload()) for _ in range(64)]
+        await asyncio.sleep(0.03)
+        assert not any(task.done() for task in waiters)
+
+        # This direct release is a bounded lock/counter operation. The writer
+        # proceeds, but all burst waiters must keep yielding while its unload
+        # body is active instead of occupying the default executor.
+        qwen._release_base17_residency_lease()
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not reclaim_started.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0)
+        assert not any(task.done() for task in waiters)
+
+        reclaim_release.set()
+        assert await asyncio.gather(*waiters) == [False] * len(waiters)
+
+    asyncio.run(exercise_burst_waiters())
+    unload_thread.join(1.0)
+    assert not unload_thread.is_alive()
+    with qwen._base17_lease_cv:
+        assert qwen._base17_unloading is False
+        assert qwen._base17_unload_waiters == 0
+
+
+def test_base17_concurrent_unloaders_serialize_the_unload_body(monkeypatch):
+    qwen = main.QwenEngine()
+    qwen._base17 = object()
+    first_reclaim_started = threading.Event()
+    first_reclaim_release = threading.Event()
+    state_lock = threading.Lock()
+    active_reclaims = 0
+    max_active_reclaims = 0
+    reclaim_calls = 0
+
+    def recording_reclaim():
+        nonlocal active_reclaims, max_active_reclaims, reclaim_calls
+        with state_lock:
+            reclaim_calls += 1
+            call = reclaim_calls
+            active_reclaims += 1
+            max_active_reclaims = max(max_active_reclaims, active_reclaims)
+        try:
+            if call == 1:
+                first_reclaim_started.set()
+                assert first_reclaim_release.wait(1.0)
+        finally:
+            with state_lock:
+                active_reclaims -= 1
+
+    monkeypatch.setattr(main, "_reclaim_host_and_vram", recording_reclaim)
+    first = threading.Thread(target=qwen.unload_base17)
+    second = threading.Thread(target=qwen.unload_base17)
+    first.start()
+    assert first_reclaim_started.wait(1.0)
+    second.start()
+
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        with qwen._base17_lease_cv:
+            if qwen._base17_unload_waiters == 1:
+                break
+        time.sleep(0.001)
+    else:
+        pytest.fail("second unloader did not wait for the active unloader")
+    with state_lock:
+        assert reclaim_calls == 1
+        assert max_active_reclaims == 1
+
+    first_reclaim_release.set()
+    first.join(1.0)
+    second.join(1.0)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert reclaim_calls == 2
+    assert max_active_reclaims == 1
+    with qwen._base17_lease_cv:
+        assert qwen._base17_unloading is False
+        assert qwen._base17_unload_waiters == 0
+
+
+def test_wait_task_ignoring_cancellation_terminates_for_cancelled_child():
+    async def body():
+        child = asyncio.create_task(asyncio.sleep(10.0))
+        child.cancel()
+        await asyncio.sleep(0)
+        assert child.cancelled()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                main._wait_task_ignoring_cancellation(child), timeout=0.2
+            )
+
+    asyncio.run(body())
+
+
+def test_cancelled_base17_lease_releases_synchronously_without_executor(monkeypatch):
+    qwen = main.QwenEngine()
+    qwen._base17 = object()
+
+    def forbidden_to_thread(*args, **kwargs):
+        raise AssertionError("Base17 lease cleanup must not use the executor")
+
+    monkeypatch.setattr(asyncio, "to_thread", forbidden_to_thread)
+
+    async def body():
+        entered = asyncio.Event()
+        stay_open = asyncio.Event()
+
+        async def holder():
+            async with qwen._base17_residency_lease() as leased:
+                assert leased is True
+                entered.set()
+                await stay_open.wait()
+
+        task = asyncio.create_task(holder())
+        await entered.wait()
+        assert qwen._base17_residency_leases == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert qwen._base17_residency_leases == 0
+
+    asyncio.run(body())
+    with qwen._base17_unload_guard(wait=False) as allowed:
+        assert allowed is True
+
+
+def test_cancelled_synth_holds_reservation_and_lease_until_worker_finishes(monkeypatch):
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    worker_finished = threading.Event()
+    reservation_active = False
+
+    class FakeRequest:
+        async def body(self):
+            return json.dumps({
+                "engine": "qwen",
+                "model": "1.7b",
+                "voice": "v",
+                "text": "hi",
+            }).encode()
+
+    class FakeQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = object()
+
+        def synthesize(self, model, voice, text, language=None):
+            worker_started.set()
+            worker_release.wait()
+            worker_finished.set()
+            return main.SynthResult(
+                pcm=b"\x00\x00", sample_rate=24000, substituted_from=None
+            )
+
+    qwen = FakeQwen()
+
+    @asynccontextmanager
+    async def recording_reservation(*args, **kwargs):
+        nonlocal reservation_active
+        reservation_active = True
+        try:
+            yield {"device": "cuda:0"}
+        finally:
+            reservation_active = False
+
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.setenv("SEG_CAPACITY_ADMISSION", "1")
+    monkeypatch.setattr(main._placement, "reservation", recording_reservation)
+    main._reset_poison_for_test()
+    main._reset_restart_state_for_test()
+
+    async def body():
+        task = asyncio.create_task(main.synthesize(FakeRequest()))
+        assert await asyncio.to_thread(worker_started.wait, 1.0)
+        assert reservation_active is True
+        assert qwen._base17_residency_leases == 1
+
+        task.cancel()
+        await asyncio.sleep(0.02)
+        assert task.done() is False
+        assert reservation_active is True
+        assert qwen._base17_residency_leases == 1
+
+        worker_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert worker_finished.is_set()
+        assert reservation_active is False
+        assert qwen._base17_residency_leases == 0
+
+    asyncio.run(body())
+    main._reset_poison_for_test()
+
+
+def test_qwen_base17_unload_route_burst_uses_one_executor_writer(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    synth_started = threading.Event()
+    synth_release = threading.Event()
+    unload_started = threading.Event()
+    unload_calls = 0
+    count_lock = threading.Lock()
+
+    class FakeQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = object()
+
+        def synthesize(self, model, voice, text, language=None):
+            synth_started.set()
+            assert synth_release.wait(1.0)
+            return main.SynthResult(
+                pcm=b"\x00\x00", sample_rate=24000, substituted_from=None
+            )
+
+        def unload_base17(self):
+            nonlocal unload_calls
+            with count_lock:
+                unload_calls += 1
+            unload_started.set()
+            return super().unload_base17()
+
+    class SynthRequest:
+        async def body(self):
+            return json.dumps({
+                "engine": "qwen",
+                "model": "1.7b",
+                "voice": "v",
+                "text": "hi",
+            }).encode()
+
+    class UnloadRequest:
+        async def body(self):
+            return b'{"engine":"qwen","model":"1.7b"}'
+
+    qwen = FakeQwen()
+
+    @asynccontextmanager
+    async def reservation(*args, **kwargs):
+        yield {"device": "cuda:0"}
+
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.setenv("SEG_CAPACITY_ADMISSION", "1")
+    monkeypatch.setattr(main._placement, "reservation", reservation)
+    monkeypatch.setattr(main, "_reclaim_host_and_vram", lambda: None)
+    main._reset_poison_for_test()
+    main._reset_restart_state_for_test()
+
+    async def wait_until_set(event):
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not event.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0)
+
+    executor = ThreadPoolExecutor(max_workers=2)
+
+    async def burst():
+        asyncio.get_running_loop().set_default_executor(executor)
+        synth_task = asyncio.create_task(main.synthesize(SynthRequest()))
+        await wait_until_set(synth_started)
+        assert qwen._base17_residency_leases == 1
+
+        unload_tasks = [
+            asyncio.create_task(main.unload_model(UnloadRequest()))
+            for _ in range(32)
+        ]
+        await wait_until_set(unload_started)
+        await asyncio.sleep(0.03)
+        with count_lock:
+            assert unload_calls == 1
+        assert not any(task.done() for task in unload_tasks)
+
+        # One executor worker is waiting in unload_base17; the other synth
+        # worker can still finish, after which the route releases its lease
+        # synchronously and lets that single unload writer proceed.
+        synth_release.set()
+        synth_response = await synth_task
+        assert synth_response.status_code == 200
+        responses = await asyncio.gather(*unload_tasks)
+        assert all(response.status_code == 200 for response in responses)
+
+    asyncio.run(burst())
+    executor.shutdown(wait=True)
+    assert qwen._base17 is None
+    assert qwen._base17_residency_leases == 0
+    with count_lock:
+        assert unload_calls == 1
+
+    # The lazy route lock must be recreated rather than reused across the
+    # separate loops common in these tests.
+    qwen._base17 = object()
+    response = asyncio.run(main.unload_model(UnloadRequest()))
+    assert response.status_code == 200
+    with count_lock:
+        assert unload_calls == 2
+    main._reset_poison_for_test()
+
+
+def test_cancelled_qwen_base17_unload_leader_holds_mutex_until_worker_finishes(
+    monkeypatch,
+):
+    unload_started = threading.Event()
+    unload_calls = 0
+    count_lock = threading.Lock()
+
+    class FakeQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._base17 = object()
+
+        def unload_base17(self):
+            nonlocal unload_calls
+            with count_lock:
+                unload_calls += 1
+            unload_started.set()
+            return super().unload_base17()
+
+    class UnloadRequest:
+        async def body(self):
+            return b'{"engine":"qwen","model":"1.7b"}'
+
+    qwen = FakeQwen()
+    assert qwen._try_acquire_base17_residency_lease() == "leased"
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.setattr(main, "_reclaim_host_and_vram", lambda: None)
+
+    async def wait_until_started():
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not unload_started.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0)
+
+    async def body():
+        leader = asyncio.create_task(main.unload_model(UnloadRequest()))
+        await wait_until_started()
+        follower = asyncio.create_task(main.unload_model(UnloadRequest()))
+        await asyncio.sleep(0)
+
+        leader.cancel()
+        await asyncio.sleep(0.03)
+        assert leader.done() is False
+        assert follower.done() is False
+        assert qwen._base17_route_unload_lock is not None
+        assert qwen._base17_route_unload_lock.locked()
+        with count_lock:
+            assert unload_calls == 1
+
+        qwen._release_base17_residency_lease()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        response = await follower
+        assert response.status_code == 200
+
+    asyncio.run(body())
+    assert qwen._base17 is None
+    assert qwen._base17_residency_leases == 0
+    with count_lock:
+        assert unload_calls == 1
+
+
+def test_resident_qwen_17b_still_refuses_when_warm_footprint_cannot_fit(monkeypatch):
+    """Warm admission remains capacity-safe instead of self-evicting to fit."""
+
+    class FakeResidentQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = object()
+            self.base17_unloads = 0
+            self.synth_calls = 0
+
+        def maybe_free_idle_base17(self, ttl_seconds):
+            self._base17 = None
+            self.base17_unloads += 1
+            return True
+
+        def synthesize(self, model, voice, text, language=None):
+            self.synth_calls += 1
+            return main.SynthResult(pcm=b"\x00\x00", sample_rate=24000, substituted_from=None)
+
+    qwen = FakeResidentQwen()
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.delitem(main.ENGINES, "kokoro", raising=False)
+    monkeypatch.setenv("SEG_CAPACITY_ADMISSION", "1")
+    monkeypatch.setenv("PRELOAD_QWEN", "0")
+    monkeypatch.setenv("PRELOAD_QWEN_BASE17", "0")
+    monkeypatch.setattr(main._placement, "footprints", main.FootprintTable())
+    monkeypatch.setattr(main._placement, "ledger", main.ReservationLedger())
+    monkeypatch.setattr(
+        main._placement,
+        "probe",
+        lambda: [{"kind": "cuda", "index": 0, "label": "g", "totalMb": 12288, "freeMb": 600}],
+    )
+    main._reset_poison_for_test()
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/synthesize",
+            json={"engine": "qwen", "model": "1.7b", "voice": "v", "text": "hi"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["neededMb"] == main.SEED_FOOTPRINTS_MB["qwen.1.7b.warm"]
+    assert qwen.base17_unloads == 0
+    assert qwen.synth_calls == 0
+    main._reset_poison_for_test()
+
+
+def test_qwen_design_keeps_engine_residency_and_can_evict_base17(monkeypatch):
+    """Design keeps pre-patch engine residency and may evict Base17."""
+
+    class FakeQwen(main.QwenEngine):
+        def __init__(self):
+            super().__init__()
+            self._device = "cuda:0"
+            self._base17 = object()
+            self._design = None
+            self.base17_unloads = 0
+
+        def maybe_free_idle_base17(self, ttl_seconds):
+            self._base17 = None
+            self.base17_unloads += 1
+            return True
+
+    qwen = FakeQwen()
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+    monkeypatch.delitem(main.ENGINES, "coqui", raising=False)
+
+    assert main._is_model_resident(
+        "qwen", "1.7b", {"op": "design"}
+    ) == main._is_resident("qwen")
+    assert main._is_model_resident(
+        "qwen", "1.7b", {"op": "mint"}
+    ) == main._is_resident("qwen")
+
+    pc = main.PlacementController(
+        probe=lambda: [{
+            "kind": "cuda",
+            "index": 0,
+            "label": "g",
+            "totalMb": 12288,
+            "freeMb": 2000 if qwen._base17 is not None else 9000,
+        }],
+        footprints=main.FootprintTable(),
+        ledger=main.ReservationLedger(),
+        reserve_mb=lambda: 500,
+        idle_evict_steps=main._idle_evict_steps,
+        is_resident=main._is_resident,
+        is_model_resident=main._is_model_resident,
+        reclaim=lambda device_key: None,
+    )
+
+    async def reserve_design():
+        async with pc.reservation(
+            "qwen", "1.7b", {"op": "design"}, cpu_capable=False, heavy=True
+        ) as admission:
+            assert admission == {"device": "cuda:0"}
+
+    asyncio.run(reserve_design())
+    assert qwen.base17_unloads == 1
+
+
+def test_qwen_model_residency_uses_the_selected_wrappers_card(monkeypatch):
+    class FakeDevice:
+        def __init__(self, index):
+            self.type = "cuda"
+            self.index = index
+
+    class FakeModule:
+        def __init__(self, index):
+            self._parameter = types.SimpleNamespace(device=FakeDevice(index))
+
+        def parameters(self):
+            return iter([self._parameter])
+
+    qwen = main.QwenEngine()
+    qwen._device = "cuda:0"
+    qwen._base = FakeModule(0)
+    qwen._base17 = FakeModule(1)
+    qwen._design = FakeModule(2)
+    monkeypatch.setitem(main.ENGINES, "qwen", qwen)
+
+    assert main._is_model_resident("qwen", "0.6b", {}) == "cuda:0"
+    assert main._is_model_resident("qwen", "1.7b", {}) == "cuda:1"
+    assert main._is_model_resident("qwen", "1.7b", {"op": "mint"}) == "cuda:0"
+    assert main._is_model_resident("qwen", "1.7b", {"op": "design"}) == "cuda:0"
 
 
 # --- device-targeted idle_evict (#1721) ---

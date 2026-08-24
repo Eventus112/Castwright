@@ -162,6 +162,14 @@ Both are measured on-box (8 GB 4070, per-op allocated peak): mint ~5654 MB
 so the shared 6144 seed keeps a ~9-13% margin over both and admits on a bare
 8 GB card before either window warms.
 
+A plain 1.7B synth also splits by exact model residency: a cold request uses
+`qwen.1.7b` (6144 MB), while an already-loaded 1.7B-Base uses
+`qwen.1.7b.warm` (768 MB). The warm seed covers the incremental forward-time
+allocation above the resident ~3.4 GB weights, rather than double-counting the
+cold footprint and evicting the same base the request is about to use. Warm
+observations subtract the pre-forward torch allocation from the reset CUDA
+peak; samples overlapping another engine reservation are discarded.
+
 `asr` similarly splits by residency, not model (#2094): a COLD `/transcribe`
 (no Whisper model loaded yet) books the full `asr` cold-load peak (400 MB —
 weights materialisation + first-call warmup); an ALREADY-RESIDENT one books
@@ -193,6 +201,7 @@ uncontended box is what makes a learned `asr.warm` figure trustworthy.
 <!-- footprint:kokoro=1200 -->
 <!-- footprint:qwen=3072 -->
 <!-- footprint:qwen.1.7b=6144 -->
+<!-- footprint:qwen.1.7b.warm=768 -->
 <!-- footprint:qwen.1.7b.mint=6144 -->
 <!-- footprint:qwen.1.7b.design=6144 -->
 <!-- footprint:coqui=3584 -->

@@ -682,6 +682,35 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="audiobook-generator local TTS sidecar", lifespan=_lifespan)
 
 
+async def _wait_task_ignoring_cancellation(task: "asyncio.Task[Any]") -> Any:
+    """Wait until ``task`` is really done, absorbing repeated caller cancels."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+            continue
+
+
+async def _run_sync_worker_cancellation_safe(func: Callable, *args: Any) -> Any:
+    """Run sync work off-loop without releasing caller resources mid-worker."""
+    worker = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancelled:
+        try:
+            await _wait_task_ignoring_cancellation(worker)
+        except BaseException:
+            pass
+        raise cancelled
+
+
+@asynccontextmanager
+async def _async_nullcontext():
+    yield
+
+
 async def _read_json_body(req: Request):
     """Parse a request's JSON body, tolerating a non-UTF-8 (Windows ANSI /
     cp1252) wire encoding of 3-byte typographic characters.
@@ -3524,6 +3553,11 @@ SEED_FOOTPRINTS_MB: dict[str, int] = {
     "kokoro": 1200,
     "qwen": 3072,
     "qwen.1.7b": 6144,
+    # A resident 1.7B-Base has already paid its ~3.4 GB weight allocation.
+    # The plain warm synth's measured ~3915 MB total peak therefore needs
+    # only the forward-time delta, not the 6144 MB cold-load reservation
+    # again. 768 MB keeps margin over the measured ~515 MB delta.
+    "qwen.1.7b.warm": 768,
     # The two 1.7B design-family ops (VoiceDesign `design_voice` and the
     # base+base co-load `mint_variant`) are far heavier than the plain 1.7B
     # synth hot path (~3915 MB) and vastly rarer, so they get their OWN keys
@@ -3604,6 +3638,8 @@ class FootprintTable:
                 return "qwen.1.7b.mint"
             if op == "design":
                 return "qwen.1.7b.design"
+            if resident and "op" not in cfg:
+                return "qwen.1.7b.warm"
             return "qwen.1.7b"
         # #2094 — an already-resident ASR model needs only its per-call
         # activation footprint for the forward, not the cold-load peak (weights
@@ -3667,7 +3703,17 @@ class ReservationLedger:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_device: dict[str, dict[int, tuple[int, str]]] = {}
+        self._overlapped_token_ids: set[int] = set()
         self._next_token_id = 1
+
+    def _add_hold_locked(
+        self, device_key: str, token_id: int, mb: int, engine: str
+    ) -> None:
+        active = self._by_device.setdefault(device_key, {})
+        if active:
+            self._overlapped_token_ids.update(active)
+            self._overlapped_token_ids.add(token_id)
+        active[token_id] = (mb, engine)
 
     def reserved_mb(self, device_key: str) -> int:
         with self._lock:
@@ -3679,13 +3725,14 @@ class ReservationLedger:
         with self._lock:
             token_id = self._next_token_id
             self._next_token_id += 1
-            self._by_device.setdefault(device_key, {})[token_id] = (mb, engine)
+            self._add_hold_locked(device_key, token_id, mb, engine)
             return (device_key, token_id)
 
     def release(self, token: tuple[str, int]) -> None:
         device_key, token_id = token
         with self._lock:
             self._by_device.get(device_key, {}).pop(token_id, None)
+            self._overlapped_token_ids.discard(token_id)
 
     def engines_holding(self, device_key: str) -> set[str]:
         """Engine keys with a live reservation on `device_key`.
@@ -3699,6 +3746,17 @@ class ReservationLedger:
         """
         with self._lock:
             return {engine for _, engine in self._by_device.get(device_key, {}).values()}
+
+    def has_overlapped(self, token: tuple[str, int]) -> bool:
+        """Whether ``token`` has ever overlapped another hold on its device.
+
+        Sticky for the token's lifetime: if the neighbouring hold releases
+        first, this token remains marked so its process-wide allocator sample
+        is still known to be contaminated.
+        """
+        _, token_id = token
+        with self._lock:
+            return token_id in self._overlapped_token_ids
 
     def _headroom(self, key: str, free_mb: int, total_mb: int, reserve_cap: int) -> int:
         """Available headroom for `key` given its live free/total and the
@@ -3732,7 +3790,7 @@ class ReservationLedger:
                 return None
             token_id = self._next_token_id
             self._next_token_id += 1
-            self._by_device.setdefault(best_key, {})[token_id] = (peak, engine)
+            self._add_hold_locked(best_key, token_id, peak, engine)
             return (best_key, token_id)
 
     def best_fit(
@@ -3875,6 +3933,9 @@ class PlacementController:
         reserve_mb: Optional[Callable[[], int]] = None,
         idle_evict_steps: Optional[Callable[[str, str], list["EvictStep"]]] = None,
         is_resident: Optional[Callable[[str], Optional[str]]] = None,
+        is_model_resident: Optional[
+            Callable[[str, Optional[str], Optional[dict]], Optional[str]]
+        ] = None,
         reclaim: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.probe = probe
@@ -3886,6 +3947,7 @@ class PlacementController:
         self.reserve_mb = reserve_mb if reserve_mb is not None else (lambda: int(os.environ.get("GPU_RESERVE_MB", 500)))
         self.idle_evict_steps = idle_evict_steps if idle_evict_steps is not None else (lambda device_key, engine: [])
         self.is_resident = is_resident if is_resident is not None else (lambda engine: None)
+        self.is_model_resident = is_model_resident
         # #1976 — injectable so tests can assert call count / sequence a fake
         # probe against without a real allocator; see `_reclaim_stranded_cache`.
         self.reclaim = reclaim if reclaim is not None else _reclaim_device_cache
@@ -3958,7 +4020,11 @@ class PlacementController:
         return best_key
 
     async def _evict_until(
-        self, device_key: str, engine: str, fits: Callable[[], Any]
+        self,
+        device_key: str,
+        engine: str,
+        fits: Callable[[], Any],
+        protected_steps: frozenset[str] = frozenset(),
     ) -> Any:
         """Run eviction steps one at a time, re-probing after each, and stop the
         moment `fits()` reports success (#1920A).
@@ -3982,6 +4048,8 @@ class PlacementController:
         same methods so the event loop and /health stay live.
         """
         for step in self.idle_evict_steps(device_key, engine):
+            if step.name in protected_steps:
+                continue
             # Re-read on every iteration, not once before the loop: nothing
             # here awaits today (every `reservation()` call site enters this
             # synchronously on the event loop), so a snapshot taken up front
@@ -4007,6 +4075,19 @@ class PlacementController:
             if got is not None:
                 return got
         return None
+
+    @staticmethod
+    def _protected_evict_steps(
+        engine: str, model: Optional[str], cfg: Optional[dict], resident: bool
+    ) -> frozenset[str]:
+        if (
+            resident
+            and engine == "qwen"
+            and model == "1.7b"
+            and "op" not in (cfg or {})
+        ):
+            return frozenset({"qwen.base17"})
+        return frozenset()
 
     async def _reclaim_stranded_cache(self, device_key: str) -> None:
         """The #1976 last-resort reclaim: a bare `gc.collect()` +
@@ -4091,9 +4172,15 @@ class PlacementController:
         # `_resolve_admission`/`reservation()` (the binding decision this
         # advisory `admit()` must not disagree with, e.g. for a resident ASR
         # engine's `neededMb`).
-        resident = self.is_resident(engine)
+        engine_resident = self.is_resident(engine)
+        resident = (
+            self.is_model_resident(engine, model, cfg)
+            if self.is_model_resident is not None
+            else engine_resident
+        )
         peak = self.footprints.peak_mb(engine, model, cfg, resident is not None)
-        constraint = resident if resident is not None else pinned
+        bound_device = resident if resident is not None else engine_resident
+        constraint = bound_device if bound_device is not None else pinned
         reserve_cap = self.reserve_mb()
         devices = self.probe()
         candidates = self._gpu_candidates(devices, constraint)
@@ -4112,7 +4199,10 @@ class PlacementController:
                     self._gpu_candidates(probed, constraint), peak, reserve_cap
                 )
 
-            key = await self._evict_until(worst, engine, _fits)
+            protected_steps = self._protected_evict_steps(
+                engine, model, cfg, resident is not None
+            )
+            key = await self._evict_until(worst, engine, _fits, protected_steps)
             if key is not None:
                 return {"device": key}
             worst = self._worst_device_key(self.probe())
@@ -4120,7 +4210,7 @@ class PlacementController:
         # at THAT device to evict from — not a roomier non-resident GPU where an
         # evict wouldn't let this (non-migratable) model fit. A pinned (but not
         # yet resident) op needs Node to evict from ITS pinned card too.
-        device_key = resident if resident is not None else (pinned if pinned is not None else worst)
+        device_key = bound_device if bound_device is not None else (pinned if pinned is not None else worst)
         # Last resort before reporting noCapacity (#1976): `_evict_until` above
         # only frees RESIDENT engines — a stranded, reserved-but-unallocated
         # pool left behind by an earlier unload has nothing there for it to
@@ -4168,6 +4258,24 @@ class PlacementController:
             torch.cuda.reset_peak_memory_stats(index)
         except Exception:
             pass
+
+    @staticmethod
+    def _allocated_mb(device_key: Optional[str]) -> Optional[int]:
+        """Current torch allocation on one CUDA device, or None on failure.
+
+        A warm Qwen reservation learns the forward-time delta above this
+        baseline rather than re-learning the already-resident model weights as
+        though every request were a cold load.
+        """
+        if not device_key or not device_key.startswith(("cuda:", "rocm:")):
+            return None
+        try:
+            import torch  # type: ignore
+
+            index = int(device_key.split(":", 1)[1])
+            return int(torch.cuda.memory_allocated(index) // 1_048_576)
+        except Exception:
+            return None
 
     @staticmethod
     def _device_free_mb(device_key: Optional[str]) -> Optional[int]:
@@ -4284,13 +4392,19 @@ class PlacementController:
         `reservation()` ORs it with an equivalent after-snapshot check so a
         foreign process present at either end of the window discards the
         sample."""
-        resident = self.is_resident(engine)
+        engine_resident = self.is_resident(engine)
+        resident = (
+            self.is_model_resident(engine, model, cfg)
+            if self.is_model_resident is not None
+            else engine_resident
+        )
         # #2094 — consult residency BEFORE booking: an already-resident engine
         # (currently only distinguished for "asr", see `FootprintTable._key`)
         # needs an incremental forward-only reservation, not the cold-load peak
         # unconditionally booked before this.
         peak = self.footprints.peak_mb(engine, model, cfg, resident is not None)
-        constraint = resident if resident is not None else pinned
+        bound_device = resident if resident is not None else engine_resident
+        constraint = bound_device if bound_device is not None else pinned
         reserve_cap = self.reserve_mb()
         devices = self.probe()
         candidates = self._gpu_candidates(devices, constraint)
@@ -4305,7 +4419,10 @@ class PlacementController:
                         self._gpu_candidates(probed, constraint), peak, reserve_cap, engine
                     )
 
-                held = await self._evict_until(worst, engine, _fits)
+                protected_steps = self._protected_evict_steps(
+                    engine, model, cfg, resident is not None
+                )
+                held = await self._evict_until(worst, engine, _fits, protected_steps)
             if held is None:
                 devices = self.probe()
                 # Last resort before noCapacity (#1976) — see `admit()`'s twin
@@ -4316,7 +4433,7 @@ class PlacementController:
                 # reclaim + one re-probe + one re-`try_hold`, only here on the
                 # failure path, so a stranded pool can never by itself cause
                 # a refusal.
-                reclaim_key = resident if resident is not None else (
+                reclaim_key = bound_device if bound_device is not None else (
                     pinned if pinned is not None else self._worst_device_key(devices)
                 )
                 if reclaim_key is not None:
@@ -4354,7 +4471,7 @@ class PlacementController:
         elif cpu_capable and not heavy:
             admission = {"device": "cpu"}
         else:
-            device_key = resident if resident is not None else (pinned if pinned is not None else self._worst_device_key(devices))
+            device_key = bound_device if bound_device is not None else (pinned if pinned is not None else self._worst_device_key(devices))
             admission = {"noCapacity": {"neededMb": peak, "deviceKey": device_key}}
         return admission, held, resident is not None, mem_before_mb, foreign_before
 
@@ -4397,6 +4514,15 @@ class PlacementController:
             admission, held, resident, mem_before_mb, foreign_before = await self._resolve_admission(
                 engine, model, cfg, cpu_capable, heavy, pinned
             )
+        warm_qwen17 = (
+            resident
+            and engine == "qwen"
+            and model == "1.7b"
+            and "op" not in (cfg or {})
+        )
+        allocated_before_mb = (
+            self._allocated_mb(held[0]) if held is not None and warm_qwen17 else None
+        )
         try:
             yield admission
         finally:
@@ -4453,6 +4579,7 @@ class PlacementController:
                     # stays None -> record() below sees 0 via the `or 0` and
                     # its own `<= 0` guard drops it) rather than attributed to
                     # ASR.
+                qwen_hold_overlapped = warm_qwen17 and self.ledger.has_overlapped(held)
                 self.ledger.release(held)
                 # `resident` (#2094) is the PRE-op snapshot `_resolve_admission`
                 # booked the reservation under — recording under that same key
@@ -4461,7 +4588,20 @@ class PlacementController:
                 # free-memory-delta measurement above (or is dropped, per the
                 # guards there); every other engine keeps the torch-allocator
                 # peak unchanged.
-                observed_mb = asr_observed_mb if engine == "asr" else self._observed_mb(device_key)
+                if engine == "asr":
+                    observed_mb = asr_observed_mb
+                else:
+                    observed_mb = self._observed_mb(device_key)
+                    if warm_qwen17:
+                        # The Qwen cold peak includes ~3.4 GB of base17 weights.
+                        # For a model that was resident before admission, learn
+                        # only the extra allocation reached by this forward.
+                        # Any concurrent reservation contaminates the process-
+                        # wide torch peak, including another Qwen operation.
+                        if allocated_before_mb is None or qwen_hold_overlapped:
+                            observed_mb = 0
+                        else:
+                            observed_mb = max(0, observed_mb - allocated_before_mb)
                 self.footprints.record(engine, model, cfg, observed_mb or 0, resident)
 
 
@@ -4514,6 +4654,30 @@ def _is_resident(engine_id: str) -> Optional[str]:
         return None
     index = card["index"] if card["index"] is not None else 0
     return f"{card['family']}:{index}"
+
+
+def _is_model_resident(
+    engine_id: str, model: Optional[str], cfg: Optional[dict]
+) -> Optional[str]:
+    """Model-specific residency for admission where one engine owns tiers.
+
+    Only plain 1.7B synthesis needs exact tier residency for its warm
+    footprint. Every other operation retains the pre-existing engine-level
+    residency contract.
+    """
+    if engine_id == "qwen" and model == "1.7b" and "op" not in (cfg or {}):
+        qwen = ENGINES.get("qwen")
+        if not isinstance(qwen, QwenEngine):
+            return None
+        target = qwen._base17
+        if target is None:
+            return None
+        card = _engine_actual_card(qwen, target)
+        if card is None or card["family"] not in ("cuda", "rocm"):
+            return None
+        index = card["index"] if card["index"] is not None else 0
+        return f"{card['family']}:{index}"
+    return _is_resident(engine_id)
 
 
 def _same_card(resident: Optional[str], target: str) -> bool:
@@ -4629,6 +4793,7 @@ _placement = PlacementController(
     reserve_mb=lambda: int(os.environ.get("GPU_RESERVE_MB", 500)),
     idle_evict_steps=_idle_evict_steps,
     is_resident=_is_resident,
+    is_model_resident=_is_model_resident,
 )
 
 
@@ -5037,6 +5202,17 @@ class QwenEngine(Engine):
         # Thread-safe (#1917) — see `InFlightCounter`.
         self._base17_last_used: float = 0.0
         self._base17_in_flight = InFlightCounter()
+        # Plain 1.7B synth acquires this residency lease BEFORE capacity
+        # admission. It closes the gap between the warm-residency snapshot and
+        # `_base17_activity()` in the worker: unloads either wait (explicit /
+        # design eviction) or decline (idle/admission eviction) until the warm
+        # reservation is finished.
+        self._base17_lease_cv = threading.Condition()
+        self._base17_residency_leases = 0
+        self._base17_unloading = False
+        self._base17_unload_waiters = 0
+        self._base17_route_unload_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._base17_route_unload_lock: Optional[asyncio.Lock] = None
         # Monotonic timestamp of the last voice-design activity. The startup
         # idle watchdog frees the heavy transient VoiceDesign model once this
         # goes stale (QWEN_DESIGN_IDLE_TTL), so a cast-review session's rapid
@@ -5366,15 +5542,91 @@ class QwenEngine(Engine):
                 raise  # OOM → generic 500, NEVER a fallback
             raise Base17UnavailableError("corrupt") from e
 
+    def _try_acquire_base17_residency_lease(self) -> str:
+        """Atomically inspect/acquire Base17 without blocking the caller."""
+        with self._base17_lease_cv:
+            if self._base17_unloading or self._base17_unload_waiters:
+                return "wait"
+            if self._base17 is None:
+                return "model-absent"
+            self._base17_residency_leases += 1
+            return "leased"
+
+    def _release_base17_residency_lease(self) -> None:
+        with self._base17_lease_cv:
+            self._base17_residency_leases -= 1
+            self._base17_lease_cv.notify_all()
+
+    def _base17_unload_lock_for_running_loop(self) -> asyncio.Lock:
+        """Return the route mutex bound to this request's event loop."""
+        loop = asyncio.get_running_loop()
+        if self._base17_route_unload_loop is not loop:
+            self._base17_route_unload_loop = loop
+            self._base17_route_unload_lock = asyncio.Lock()
+        assert self._base17_route_unload_lock is not None
+        return self._base17_route_unload_lock
+
+    @asynccontextmanager
+    async def _base17_residency_lease(self):
+        """Lease resident Base17 without blocking the asyncio event loop."""
+        state = self._try_acquire_base17_residency_lease()
+        while state == "wait":
+            await asyncio.sleep(0.01)
+            state = self._try_acquire_base17_residency_lease()
+        leased = state == "leased"
+        try:
+            yield leased
+        finally:
+            if leased:
+                self._release_base17_residency_lease()
+
+    @contextmanager
+    def _base17_unload_guard(self, *, wait: bool):
+        """Exclude new residency leases while one unload decision runs."""
+        allowed = False
+        owns_unload = False
+        try:
+            with self._base17_lease_cv:
+                if wait:
+                    self._base17_unload_waiters += 1
+                    try:
+                        while self._base17_unloading:
+                            self._base17_lease_cv.wait()
+                        self._base17_unloading = True
+                        owns_unload = True
+                    finally:
+                        self._base17_unload_waiters -= 1
+                        self._base17_lease_cv.notify_all()
+                    while self._base17_residency_leases > 0:
+                        self._base17_lease_cv.wait()
+                    allowed = True
+                elif (
+                    not self._base17_unloading
+                    and not self._base17_unload_waiters
+                    and self._base17_residency_leases == 0
+                ):
+                    self._base17_unloading = True
+                    owns_unload = True
+                    allowed = True
+            yield allowed
+        finally:
+            if owns_unload:
+                with self._base17_lease_cv:
+                    self._base17_unloading = False
+                    self._base17_lease_cv.notify_all()
+
     def unload_base17(self) -> None:
         """Drop the 1.7B-Base model and free VRAM. Idempotent.
 
         Mirrors `unload` but targets only the 1.7B-Base. Acquires `_synth_lock`
         before nulling — same rationale as `unload` (prevents a concurrent
         synth forward from seeing a null mid-generate)."""
-        with self._synth_lock:
-            self._base17 = None
-        _reclaim_host_and_vram()
+        with self._base17_unload_guard(wait=True) as allowed:
+            if not allowed:
+                return
+            with self._synth_lock:
+                self._base17 = None
+            _reclaim_host_and_vram()
 
     @contextmanager
     def _base17_activity(self):
@@ -5416,12 +5668,15 @@ class QwenEngine(Engine):
             return False
         if time.monotonic() - self._base17_last_used <= ttl_seconds:
             return False
-        with self._synth_lock:
-            if self._base17 is None or self._base17_in_flight.busy:
+        with self._base17_unload_guard(wait=False) as allowed:
+            if not allowed:
                 return False
-            if time.monotonic() - self._base17_last_used <= ttl_seconds:
-                return False
-            self._base17 = None
+            with self._synth_lock:
+                if self._base17 is None or self._base17_in_flight.busy:
+                    return False
+                if time.monotonic() - self._base17_last_used <= ttl_seconds:
+                    return False
+                self._base17 = None
         _reclaim_host_and_vram()
         log.info("Qwen 1.7B-Base unloaded (idle watchdog).")
         return True
@@ -9001,6 +9256,18 @@ def _kokoro_package_installed() -> bool:
         return False
 
 
+def _kokoro_weights_present() -> bool:
+    """True when both files KokoroEngine._ensure_loaded requires are present."""
+    default_dir = os.path.join(os.path.dirname(__file__), "voices", "kokoro")
+    model_path = os.environ.get(
+        "KOKORO_MODEL_PATH", os.path.join(default_dir, "kokoro-v1.0.onnx")
+    )
+    voices_path = os.environ.get(
+        "KOKORO_VOICES_PATH", os.path.join(default_dir, "voices-v1.0.bin")
+    )
+    return os.path.isfile(model_path) and os.path.isfile(voices_path)
+
+
 def _whisper_package_installed() -> bool:
     """True if the `faster_whisper` package is importable without importing it."""
     try:
@@ -9213,16 +9480,23 @@ def _kokoro_session_device(engine: "KokoroEngine") -> Optional[str]:
         return None
 
 
-def _engine_actual_card(engine: Any) -> Optional[dict]:
+_ENGINE_MODEL_UNSET = object()
+
+
+def _engine_actual_card(engine: Any, selected_model: Any = _ENGINE_MODEL_UNSET) -> Optional[dict]:
     """(family, index, fell_back) for a LOADED engine, else None. index is the
     real torch ordinal for torch engines; None for ORT/CT2 (family only).
     fell_back = requested cuda but resolved cpu (the silent-CPU signal)."""
-    model = (
-        getattr(engine, "_model", None)
-        or getattr(engine, "_kokoro", None)
-        or getattr(engine, "_base", None)
-        or getattr(engine, "_tts", None)  # CoquiEngine keeps its model here
-    )
+    model = selected_model
+    if model is _ENGINE_MODEL_UNSET:
+        model = (
+            getattr(engine, "_model", None)
+            or getattr(engine, "_kokoro", None)
+            or getattr(engine, "_base", None)
+            or getattr(engine, "_base17", None)
+            or getattr(engine, "_design", None)
+            or getattr(engine, "_tts", None)  # CoquiEngine keeps its model here
+        )
     if model is None:
         return None
     requested_fam, _ = _parse_device(getattr(engine, "_requested_device", None))
@@ -9402,6 +9676,7 @@ def health() -> dict[str, Any]:
         "coqui_weights_present": _coqui_weights_present(),
         "coqui_version": _coqui_installed_version(),
         "kokoro_package_installed": _kokoro_package_installed(),
+        "kokoro_weights_present": _kokoro_weights_present(),
         "whisper_package_installed": _whisper_package_installed(),
         # (#1965) The same real-import-attempt truth for the other three
         # engines, alongside their find_spec-only `*_package_installed` probes.
@@ -9781,7 +10056,12 @@ async def unload_model(req: Request) -> JSONResponse:
         if isinstance(qwen, QwenEngine):
             qwen_model_sel = body.get("model")
             if qwen_model_sel == "1.7b":
-                await asyncio.to_thread(qwen.unload_base17)
+                async with qwen._base17_unload_lock_for_running_loop():
+                    # Concurrent route calls coalesce behind this async mutex.
+                    # The leader unloads; followers observe its result and
+                    # return idempotently without consuming executor workers.
+                    if qwen._base17 is not None:
+                        await _run_sync_worker_cancellation_safe(qwen.unload_base17)
             else:
                 await asyncio.to_thread(qwen.unload)
         return JSONResponse({"status": "idle"})
@@ -10547,19 +10827,27 @@ async def synthesize(req: Request) -> Response:
         # held before the call starts. Off (the default): unchanged behaviour.
         if _capacity_admission_enabled():
             cap = _ENGINE_CAPACITY_PROFILE.get(engine_id, {"cpu_capable": False, "heavy": True})
-            async with _placement.reservation(
-                engine_id, model, {}, cpu_capable=cap["cpu_capable"], heavy=cap["heavy"]
-            ) as adm:
-                if "noCapacity" in adm:
-                    return JSONResponse(
-                        {
-                            "noCapacity": True,
-                            "neededMb": adm["noCapacity"]["neededMb"],
-                            "deviceKey": adm["noCapacity"]["deviceKey"],
-                        },
-                        status_code=503,
+            residency_lease = (
+                engine._base17_residency_lease()
+                if isinstance(engine, QwenEngine) and model == "1.7b"
+                else _async_nullcontext()
+            )
+            async with residency_lease:
+                async with _placement.reservation(
+                    engine_id, model, {}, cpu_capable=cap["cpu_capable"], heavy=cap["heavy"]
+                ) as adm:
+                    if "noCapacity" in adm:
+                        return JSONResponse(
+                            {
+                                "noCapacity": True,
+                                "neededMb": adm["noCapacity"]["neededMb"],
+                                "deviceKey": adm["noCapacity"]["deviceKey"],
+                            },
+                            status_code=503,
+                        )
+                    result = await _run_sync_worker_cancellation_safe(
+                        engine.synthesize, model, voice, text, language
                     )
-                result = await asyncio.to_thread(engine.synthesize, model, voice, text, language)
         else:
             result = await asyncio.to_thread(engine.synthesize, model, voice, text, language)
     except VoiceLanguageUnsupportedError as exc:
@@ -10973,5 +11261,3 @@ async def synthesize_batch(req: Request) -> Response:
         media_type="application/octet-stream",
         headers={"X-Sample-Rate": str(result.sample_rate)},
     )
-
-

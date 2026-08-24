@@ -1431,6 +1431,22 @@ def test_ledger_reports_which_engines_hold_a_device():
     assert ledger.engines_holding("cuda:2") == set()
 
 
+def test_ledger_detects_another_same_engine_hold_by_token():
+    ledger = main.ReservationLedger()
+    first = ledger.hold("cuda:0", 700, "qwen")
+    assert ledger.has_overlapped(first) is False
+
+    second = ledger.hold("cuda:0", 700, "qwen")
+    assert ledger.engines_holding("cuda:0") == {"qwen"}
+    assert ledger.has_overlapped(first) is True
+    assert ledger.has_overlapped(second) is True
+
+    ledger.release(second)
+    assert ledger.has_overlapped(first) is True
+    ledger.release(first)
+    assert ledger.has_overlapped(first) is False
+
+
 def test_try_hold_records_the_admitting_engine():
     ledger = main.ReservationLedger()
     tok = ledger.try_hold([("cuda:0", 8000, 8000)], 3000, 768, "coqui")

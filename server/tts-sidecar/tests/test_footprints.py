@@ -5,6 +5,7 @@ and are COLD-START PRIORS only: once enough real per-op observations have
 been recorded, the learned windowed p95 supersedes the seed (up OR down)."""
 from __future__ import annotations
 
+import asyncio
 import re
 import sys
 from pathlib import Path
@@ -83,6 +84,111 @@ def test_design_family_keys_separate_from_synth():
     assert main.FootprintTable._key("qwen", "1.7b", {"op": "design"}) == "qwen.1.7b.design"
     # An unknown op falls back to the shared synth key rather than inventing one.
     assert main.FootprintTable._key("qwen", "1.7b", {"op": "bogus"}) == "qwen.1.7b"
+
+
+def test_qwen_17b_residency_splits_warm_from_cold_synth():
+    assert main.FootprintTable._key("qwen", "1.7b", {}, resident=False) == "qwen.1.7b"
+    assert main.FootprintTable._key("qwen", "1.7b", {}, resident=True) == "qwen.1.7b.warm"
+    assert main.FootprintTable._key(
+        "qwen", "1.7b", {"op": "bogus"}, resident=True
+    ) == "qwen.1.7b"
+
+    t = main.FootprintTable()
+    cold = t.peak_mb("qwen", "1.7b", {}, resident=False)
+    warm = t.peak_mb("qwen", "1.7b", {}, resident=True)
+    assert cold == 6144
+    assert warm == main.SEED_FOOTPRINTS_MB["qwen.1.7b.warm"]
+    assert warm < cold
+
+
+def test_qwen_17b_warm_and_cold_windows_learn_independently():
+    t = main.FootprintTable()
+    for _ in range(main._FOOTPRINT_MIN_SAMPLES):
+        t.record("qwen", "1.7b", {}, 5600, resident=False)
+        t.record("qwen", "1.7b", {}, 500, resident=True)
+
+    assert t.peak_mb("qwen", "1.7b", {}, resident=False) == 5600
+    assert t.peak_mb("qwen", "1.7b", {}, resident=True) == 500
+
+
+def test_qwen_design_and_mint_record_total_not_warm_delta():
+    class RecordingFootprints:
+        def __init__(self):
+            self.records = []
+
+        def peak_mb(self, engine, model, cfg, resident=False):
+            return 100
+
+        def record(self, engine, model, cfg, observed_mb, resident=False):
+            self.records.append((cfg["op"], observed_mb, resident))
+
+    footprints = RecordingFootprints()
+    pc = main.PlacementController(
+        probe=lambda: [{
+            "kind": "cuda", "index": 0, "label": "g", "totalMb": 8192, "freeMb": 7000,
+        }],
+        footprints=footprints,
+        ledger=main.ReservationLedger(),
+        reserve_mb=lambda: 500,
+        is_resident=lambda engine: "cuda:0",
+        is_model_resident=lambda engine, model, cfg: "cuda:0",
+    )
+    allocated_calls = []
+    pc._allocated_mb = lambda device_key: allocated_calls.append(device_key) or 3000
+    pc._observed_mb = lambda device_key: 5000
+
+    async def reserve_design_and_mint():
+        for op in ("design", "mint"):
+            async with pc.reservation(
+                "qwen", "1.7b", {"op": op}, cpu_capable=False, heavy=True
+            ) as admission:
+                assert admission == {"device": "cuda:0"}
+
+    asyncio.run(reserve_design_and_mint())
+
+    assert allocated_calls == []
+    assert footprints.records == [
+        ("design", 5000, True),
+        ("mint", 5000, True),
+    ]
+
+
+def test_qwen_warm_sample_is_discarded_for_another_same_engine_hold():
+    class RecordingFootprints:
+        def __init__(self):
+            self.records = []
+
+        def peak_mb(self, engine, model, cfg, resident=False):
+            return 100
+
+        def record(self, engine, model, cfg, observed_mb, resident=False):
+            self.records.append(observed_mb)
+
+    footprints = RecordingFootprints()
+    ledger = main.ReservationLedger()
+    pc = main.PlacementController(
+        probe=lambda: [{
+            "kind": "cuda", "index": 0, "label": "g", "totalMb": 8192, "freeMb": 7000,
+        }],
+        footprints=footprints,
+        ledger=ledger,
+        reserve_mb=lambda: 500,
+        is_resident=lambda engine: "cuda:0",
+        is_model_resident=lambda engine, model, cfg: "cuda:0",
+    )
+    pc._allocated_mb = lambda device_key: 3000
+    pc._observed_mb = lambda device_key: 5000
+
+    async def reserve_with_competing_qwen_hold():
+        async with pc.reservation(
+            "qwen", "1.7b", {}, cpu_capable=False, heavy=True
+        ) as admission:
+            assert admission == {"device": "cuda:0"}
+            other = ledger.hold("cuda:0", 100, "qwen")
+            ledger.release(other)
+
+    asyncio.run(reserve_with_competing_qwen_hold())
+    assert footprints.records == [0]
 
 
 def test_design_family_windows_are_independent():
