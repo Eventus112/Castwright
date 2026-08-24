@@ -37,6 +37,33 @@ const REPO_ROOT = join(__dirname, '..', '..');
 const TSX_CLI = join(REPO_ROOT, 'server', 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const INNER_TEST = join(__dirname, 'repair-missing-book-language.inner.test.mts');
 
+function parseNodeTestSummary(output) {
+  const marker = String.raw`^[ \t]*(?:ℹ|#)[ \t]+`;
+  const summary = output.match(
+    new RegExp(
+      `${marker}tests[ \t]+(\\d+)[ \t]*\\r?$[\\s\\S]*?` +
+        `${marker}pass[ \t]+(\\d+)[ \t]*\\r?$[\\s\\S]*?` +
+        `${marker}fail[ \t]+(\\d+)[ \t]*\\r?$`,
+      'm',
+    ),
+  );
+  if (!summary) return null;
+  return { total: Number(summary[1]), passed: Number(summary[2]), failed: Number(summary[3]) };
+}
+
+test('node:test summary parser accepts spec and TAP reporter prefixes', () => {
+  const expected = { total: 41, passed: 41, failed: 0 };
+  assert.deepEqual(parseNodeTestSummary('ℹ tests 41\nℹ pass 41\nℹ fail 0\n'), expected);
+  assert.deepEqual(parseNodeTestSummary('# tests 41\n# pass 41\n# fail 0\n'), expected);
+});
+
+test('node:test summary parser rejects markers embedded in other output', () => {
+  assert.equal(
+    parseNodeTestSummary('message # tests 41\nmessage # pass 41\nmessage # fail 0\n'),
+    null,
+  );
+});
+
 test('repair-missing-book-language: full suite (real detect-language/state-migrate via tsx)', () => {
   if (!existsSync(TSX_CLI)) {
     throw new Error(
@@ -76,11 +103,9 @@ test('repair-missing-book-language: full suite (real detect-language/state-migra
 
   // Guard against the exact silent-skip failure mode above: a run that
   // reports zero tests must NOT read as success.
-  const summary = output.match(/ℹ tests (\d+)[\s\S]*?ℹ pass (\d+)[\s\S]*?ℹ fail (\d+)/);
+  const summary = parseNodeTestSummary(output);
   assert.ok(summary, 'inner tsx --test run did not print the expected node:test summary block');
-  const total = Number(summary[1]);
-  const passed = Number(summary[2]);
-  const failed = Number(summary[3]);
+  const { total, passed, failed } = summary;
   assert.equal(failed, 0, `${failed} inner test(s) failed`);
   assert.ok(total > 0, 'inner tsx --test run reported ZERO tests — see NODE_TEST_CONTEXT note above');
   assert.equal(passed, total, `expected all ${total} inner tests to pass, only ${passed} did`);
