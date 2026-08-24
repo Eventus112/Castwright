@@ -33,6 +33,42 @@ const initialState: ExportsState = {
   linger: {},
 };
 
+function captionKeyPart(value: string | null | undefined): string {
+  return value === undefined ? '<undefined>' : value === null ? '<null>' : value;
+}
+
+function revocationKey(job: BookExportJob): string {
+  if (job.format !== 'captions') return job.format;
+  return [
+    job.format,
+    captionKeyPart(job.captionFileFormat),
+    captionKeyPart(job.captionGranularity),
+    captionKeyPart(job.captionScope),
+  ].join('|');
+}
+
+function completedTimestamp(job: BookExportJob): number {
+  const parsed = Date.parse(job.completedAt ?? job.createdAt);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+/** Mirror server revokeStaleSameFormat for completed artifacts while keeping
+    concurrent/rerunnable non-done rows visible in the queue. */
+function withoutRevokedDoneJobs(jobs: BookExportJob[]): BookExportJob[] {
+  const winners = new Map<string, BookExportJob>();
+  for (const job of jobs) {
+    if (job.status !== 'done') continue;
+    const key = revocationKey(job);
+    const current = winners.get(key);
+    if (!current || completedTimestamp(job) > completedTimestamp(current)) {
+      winners.set(key, job);
+    }
+  }
+  return jobs.filter(
+    (job) => job.status !== 'done' || winners.get(revocationKey(job))?.id === job.id,
+  );
+}
+
 export const exportsSlice = createSlice({
   name: 'exports',
   initialState,
@@ -58,6 +94,9 @@ export const exportsSlice = createSlice({
       const idx = list.findIndex((j) => j.id === job.id);
       if (idx < 0) list.unshift(job);
       else list[idx] = job;
+      if (job.status === 'done') {
+        s.byBookId[job.bookId] = withoutRevokedDoneJobs(list);
+      }
     },
 
     /* Remove a job from the rail. The modal exposes this via a "Dismiss"
@@ -73,7 +112,7 @@ export const exportsSlice = createSlice({
        on a revisit it reconciles to the server's authoritative set. The
        poll middleware picks up any non-terminal jobs from here. */
     exportsHydrated: (s, a: PayloadAction<{ bookId: string; jobs: BookExportJob[] }>) => {
-      s.byBookId[a.payload.bookId] = a.payload.jobs;
+      s.byBookId[a.payload.bookId] = withoutRevokedDoneJobs(a.payload.jobs);
     },
 
     lanUrlsHydrated: (s, a: PayloadAction<{ urls: string[]; port: number }>) => {

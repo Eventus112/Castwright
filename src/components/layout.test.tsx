@@ -16,7 +16,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
-import { MemoryRouter, Routes, Route } from 'react-router';
+import { MemoryRouter, Routes, Route, useLocation, useNavigate } from 'react-router';
 
 import { uiSlice } from '../store/ui-slice';
 import { castSlice } from '../store/cast-slice';
@@ -204,10 +204,125 @@ function makeStore() {
   });
 }
 
+function BootLocationHarness() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output data-testid="boot-location">{location.pathname}</output>
+      <button type="button" onClick={() => navigate('/setup')}>
+        Open Setup manually
+      </button>
+      <button type="button" onClick={() => navigate('/elsewhere')}>
+        Go elsewhere
+      </button>
+      <Layout />
+    </>
+  );
+}
+
+function setupReadiness(ready: boolean, completedAt: string | null) {
+  const pass = { status: 'pass' as const, cause: 'pass' as const, message: '', remediation: '' };
+  return {
+    ready,
+    completedAt,
+    blockers: { sidecar: pass, ffmpeg: pass, tts: pass, analyzer: pass },
+    info: { gpu: 'test', vramTotalMb: null },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function renderBootLocation(initialEntry: string) {
+  return render(
+    <Provider store={makeStore()}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route path="*" element={<BootLocationHarness />} />
+        </Routes>
+      </MemoryRouter>
+    </Provider>,
+  );
+}
+
 beforeEach(() => {
   getBookStateMock.mockReset();
   pollRevisionsMock.mockReset();
   pollRevisionsMock.mockResolvedValue({ pending: [], drift: [] });
+});
+
+describe('Layout — one-shot Setup boot redirect', () => {
+  afterEach(() => {
+    vi.mocked(api.getSetupReadiness).mockResolvedValue(setupReadiness(
+      true,
+      '2026-06-12T00:00:00.000Z',
+    ) as never);
+  });
+
+  it('redirects to Setup only for an incomplete first run that is not ready', async () => {
+    vi.mocked(api.getSetupReadiness).mockResolvedValue(setupReadiness(false, null) as never);
+    renderBootLocation('/');
+
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/setup'));
+  });
+
+  it('does not redirect a completed user because startup readiness is transiently false', async () => {
+    vi.mocked(api.getSetupReadiness).mockResolvedValue(
+      setupReadiness(false, '2026-06-12T00:00:00.000Z') as never,
+    );
+    renderBootLocation('/');
+
+    await waitFor(() => expect(screen.queryByText('Checking your setup…')).toBeNull());
+    expect(screen.getByTestId('boot-location')).toHaveTextContent('/');
+  });
+
+  it('replaces a completed user stale Setup URL once, then permits manual Setup navigation', async () => {
+    vi.mocked(api.getSetupReadiness).mockResolvedValue(
+      setupReadiness(true, '2026-06-12T00:00:00.000Z') as never,
+    );
+    renderBootLocation('/setup');
+
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/'));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Setup manually' }));
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/setup'));
+  });
+
+  it('does not let a late completed boot response overwrite newer navigation', async () => {
+    const pending = deferred<ReturnType<typeof setupReadiness>>();
+    vi.mocked(api.getSetupReadiness).mockImplementation(() => pending.promise as never);
+    renderBootLocation('/setup');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go elsewhere' }));
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/elsewhere'));
+
+    await act(async () => {
+      pending.resolve(setupReadiness(true, '2026-06-12T00:00:00.000Z'));
+      await pending.promise;
+    });
+    await waitFor(() => expect(screen.queryByText('Checking your setup…')).toBeNull());
+    expect(screen.getByTestId('boot-location')).toHaveTextContent('/elsewhere');
+  });
+
+  it('still forces an incomplete first run into Setup after newer navigation', async () => {
+    const pending = deferred<ReturnType<typeof setupReadiness>>();
+    vi.mocked(api.getSetupReadiness).mockImplementation(() => pending.promise as never);
+    renderBootLocation('/');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go elsewhere' }));
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/elsewhere'));
+
+    await act(async () => {
+      pending.resolve(setupReadiness(false, null));
+      await pending.promise;
+    });
+    await waitFor(() => expect(screen.getByTestId('boot-location')).toHaveTextContent('/setup'));
+  });
 });
 
 describe('Layout — per-book hydration: revisions branch (plan 27)', () => {

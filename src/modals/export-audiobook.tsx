@@ -3,7 +3,8 @@
    shovelling it into a synced folder.
 
    Two tabs:
-   - "Download to phone": shows the server's LAN URL + a QR code so the
+   - "Download to phone": combines the server's LAN origin with a finished
+     export's download URL and shows that artifact link + a QR code so the
      user can scan it from their Android phone's camera, hit the link in
      Chrome, and let the browser save the audiobook into Downloads/.
      Tap → Open with → PocketBook Reader.
@@ -65,6 +66,7 @@ type TabId = 'download' | 'sync-folder';
    was generated with a different codec. */
 type FormatId = 'm4b' | 'mp3-zip' | 'mp3-folder' | 'aac-m4a-zip' | 'opus-ogg-zip' | 'captions';
 type TileHintKey = 'voice' | 'smart_audiobook' | 'bookplayer' | 'audiobookshelf';
+const EMPTY_EXPORT_JOBS: BookExportJob[] = [];
 
 /* Per-tile specialisation. Adding a new live tile is one entry here +
    the corresponding handler wire-up in `src/views/listen.tsx`. The
@@ -155,6 +157,62 @@ function tileHintFor(appHint: string | undefined): TileHint | null {
   return (TILE_HINTS as Record<string, TileHint | undefined>)[appHint] ?? null;
 }
 
+function matchesDownloadSelection(
+  job: BookExportJob,
+  format: FormatId,
+  captionFileFormat: 'srt' | 'vtt',
+  captionGranularity: 'line' | 'sentence' | 'word',
+  captionScope: 'whole-book' | 'per-chapter',
+): boolean {
+  if (job.status !== 'done' || !job.downloadUrl || job.format !== format) return false;
+  if (format !== 'captions') return true;
+  return (
+    job.captionFileFormat === captionFileFormat &&
+    job.captionGranularity === captionGranularity &&
+    job.captionScope === captionScope
+  );
+}
+
+function completedTimestamp(job: BookExportJob): number {
+  const parsed = Date.parse(job.completedAt ?? job.createdAt);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+interface DownloadTarget {
+  href: string;
+  qrUrl: string | null;
+}
+
+function resolveDownloadTarget(
+  lanUrl: string | null,
+  downloadUrl: string | null,
+): DownloadTarget | null {
+  if (!downloadUrl) return null;
+  const raw = downloadUrl.trim();
+  if (!raw) return null;
+  try {
+    const explicitScheme = /^([a-z][a-z\d+.-]*):/i.exec(raw)?.[1].toLowerCase();
+    if (explicitScheme === 'blob') {
+      const blob = new URL(raw);
+      return blob.protocol === 'blob:' ? { href: blob.toString(), qrUrl: null } : null;
+    }
+    if (explicitScheme) {
+      if (explicitScheme !== 'http' && explicitScheme !== 'https') return null;
+      const absolute = new URL(raw);
+      if (absolute.username || absolute.password) return null;
+      return { href: absolute.toString(), qrUrl: absolute.toString() };
+    }
+    if (!lanUrl) return null;
+    const lan = new URL(lanUrl);
+    if (lan.protocol !== 'http:' && lan.protocol !== 'https:') return null;
+    const artifact = new URL(raw, `${lan.origin}/`);
+    if (artifact.origin !== lan.origin) return null;
+    return { href: artifact.toString(), qrUrl: artifact.toString() };
+  } catch {
+    return null;
+  }
+}
+
 export function ExportAudiobookModal({
   open,
   bookId,
@@ -184,7 +242,22 @@ export function ExportAudiobookModal({
   const [submitting, setSubmitting] = useState(false);
   const [syncFolderDraft, setSyncFolderDraft] = useState(account.exportSyncFolder ?? '');
   const [syncFolderSaving, setSyncFolderSaving] = useState(false);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [renderedQr, setRenderedQr] = useState<{ source: string; dataUrl: string } | null>(null);
+  const bookJobs = useAppSelector((s) => s.exports.byBookId[bookId] ?? EMPTY_EXPORT_JOBS);
+  const activeJob: BookExportJob | undefined = activeJobId
+    ? bookJobs.find((job) => job.id === activeJobId)
+    : undefined;
+  const matchingDoneJobs = bookJobs.filter((job) =>
+    matchesDownloadSelection(job, format, captionFileFormat, captionGranularity, captionScope),
+  );
+  const readyDownloadJob = matchingDoneJobs.reduce<BookExportJob | undefined>((latest, job) => {
+    if (!latest) return job;
+    return completedTimestamp(job) > completedTimestamp(latest) ? job : latest;
+  }, undefined);
+  const lanUrl = lanUrls[0] ?? null;
+  const downloadTarget = resolveDownloadTarget(lanUrl, readyDownloadJob?.downloadUrl ?? null);
+  const qrUrl = downloadTarget?.qrUrl ?? null;
+  const qrDataUrl = renderedQr?.source === qrUrl ? renderedQr.dataUrl : null;
 
   /* Hydrate LAN URLs once when the modal opens — they don't change without
      a server restart, so we keep the value cached on the slice. */
@@ -263,31 +336,24 @@ export function ExportAudiobookModal({
     wasOpenRef.current = open;
   }, [open, initialTab, prefill?.destination, prefill?.format, account.exportSyncFolder]);
 
-  /* QR render of the first LAN URL. Stays null until both the URL and
-     the tab agree it's worth drawing. */
+  /* QR points at the finished artifact, never the SPA's LAN root. Binding
+     the rendered data to its source also prevents one stale frame while a
+     replacement QR promise is pending or rejected. */
   useEffect(() => {
-    const url = lanUrls[0];
-    if (!open || tab !== 'download' || !url) {
-      setQrDataUrl(null);
-      return;
-    }
+    setRenderedQr(null);
+    if (!open || tab !== 'download' || !qrUrl) return;
     let cancelled = false;
-    QRCode.toDataURL(url, { margin: 1, scale: 6 })
+    QRCode.toDataURL(qrUrl, { margin: 1, scale: 6 })
       .then((dataUrl) => {
-        if (!cancelled) setQrDataUrl(dataUrl);
+        if (!cancelled) setRenderedQr({ source: qrUrl, dataUrl });
       })
       .catch(() => {
-        /* fall back to text URL */
+        if (!cancelled) setRenderedQr(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [open, tab, lanUrls]);
-
-  /* Hook must run on every render — keep it above the early return. */
-  const activeJob: BookExportJob | undefined = useAppSelector((s) =>
-    activeJobId ? (s.exports.byBookId[bookId] ?? []).find((j) => j.id === activeJobId) : undefined,
-  );
+  }, [open, tab, qrUrl]);
 
   if (!open) return null;
 
@@ -390,7 +456,6 @@ export function ExportAudiobookModal({
     void handleSubmit();
   };
 
-  const lanUrl = lanUrls[0] ?? null;
   const syncFolder = account.exportSyncFolder ?? null;
   const canSubmit =
     !submitting &&
@@ -499,7 +564,12 @@ export function ExportAudiobookModal({
                 saveError={account.error}
               />
             ) : tab === 'download' ? (
-              <DownloadTab url={lanUrl} qrDataUrl={qrDataUrl} />
+              <DownloadTab
+                url={downloadTarget?.href ?? null}
+                lanAvailable={lanUrl != null}
+                qrEnabled={qrUrl != null}
+                qrDataUrl={qrDataUrl}
+              />
             ) : (
               <SyncFolderTab
                 draft={syncFolderDraft}
@@ -713,13 +783,34 @@ function CaptionsOptions({
   );
 }
 
-function DownloadTab({ url, qrDataUrl }: { url: string | null; qrDataUrl: string | null }) {
-  if (!url) {
+function DownloadTab({
+  url,
+  lanAvailable,
+  qrEnabled,
+  qrDataUrl,
+}: {
+  url: string | null;
+  lanAvailable: boolean;
+  qrEnabled: boolean;
+  qrDataUrl: string | null;
+}) {
+  if (!url && !lanAvailable) {
     return (
       <p>
         The server doesn't currently see a LAN-routable IP. Make sure your PC and phone are on the
         same Wi-Fi, then re-open this modal.
       </p>
+    );
+  }
+  if (!url) {
+    return (
+      <div data-testid="export-download-not-ready">
+        <p>No finished download is ready for this format yet.</p>
+        <p className="mt-3 text-xs text-ink/55">
+          Choose the format you want, then press <strong>Build download</strong> below. The file
+          link and QR code will appear here when the export finishes.
+        </p>
+      </div>
     );
   }
   return (
@@ -731,21 +822,34 @@ function DownloadTab({ url, qrDataUrl }: { url: string | null; qrDataUrl: string
           markers and title/author tags already in place.
         </p>
         <div className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-full bg-canvas border border-ink/10 text-sm font-mono">
-          <a href={url} target="_blank" rel="noreferrer" className="text-ink hover:underline">
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-ink hover:underline"
+            data-testid="export-download-link"
+          >
             {url}
           </a>
           <IconExternal className="w-3.5 h-3.5 text-ink/50" />
         </div>
         <p className="mt-3 text-xs text-ink/55">
-          The "Build download" button below stages a zip on the server, then the link above takes
-          you to it.
+          {qrEnabled
+            ? 'This link and QR code point directly to the finished file.'
+            : 'This local preview link points directly to the finished file.'}{' '}
+          Build download again only if you want to replace it with a fresh export.
         </p>
       </div>
       <div className="flex justify-end">
-        {qrDataUrl ? (
+        {!qrEnabled ? (
+          <div className="w-[160px] h-[160px] rounded-xl border border-dashed border-ink/15 grid place-items-center text-xs text-ink/40 text-center px-3">
+            QR is unavailable for this local preview link.
+          </div>
+        ) : qrDataUrl ? (
           <img
             src={qrDataUrl}
-            alt="LAN URL QR code"
+            alt="Download file QR code"
+            data-testid="export-download-qr"
             className="w-[160px] h-[160px] rounded-xl border border-ink/10 bg-white p-1"
           />
         ) : (

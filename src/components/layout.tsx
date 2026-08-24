@@ -460,6 +460,9 @@ export function Layout() {
      react-router's navigate (replace semantics to match the old behavior). */
   const navigate = useNavigate();
   const location = useLocation();
+  const initialPathnameRef = useRef(location.pathname);
+  const currentPathnameRef = useRef(location.pathname);
+  currentPathnameRef.current = location.pathname;
   const skipFirst = useRef(true);
   /* Plan 102 — cold-boot hydrate of the workspace queue. One call per app
      mount; the modal re-fetches on every open to catch cross-tab mutations
@@ -504,13 +507,12 @@ export function Layout() {
   }, []);
 
   /* fs-21 — boot-splash readiness gate. Probe setup readiness ONCE per app
-     boot (`[]` deps — never re-fetch on navigation). While the probe is in
-     flight `setupReady === null` and the splash below blocks the first paint.
-     On resolve: `!ready` → redirect to #/setup (a harmless no-op if already
-     there, so we don't read the current stage — Layout does NOT import
-     `store`); `ready` → render normally. The boot fetch runs buildDiagnostics
-     server-side (~2 s worst-case probe timeout); a failed probe fails OPEN so
-     a flaky readiness endpoint never locks the user out of the app. */
+     boot (`[]` deps — never re-fetch on navigation). Only a genuine first run
+     (no completedAt + not ready) is redirected into Setup. A completed user
+     is never forced back by transient startup readiness; if their persisted
+     URL is stale #/setup, leave it once with replace. Because this decision is
+     one-shot, manually opening Setup later in the same app session still
+     works. A failed probe fails OPEN so it never locks the user out. */
   const [setupReady, setSetupReady] = useState<boolean | null>(null); // null = checking
   /* fs-21 wave 4 — shared diagnosis poller (also consumed by the Setup
      wizard). Drives the Status popover's four blocker diagnosis blocks and
@@ -523,9 +525,16 @@ export function Layout() {
       .then((r) => {
         if (cancelled) return;
         setSetupReady(r.ready);
-        // Redirecting to /setup when already there is a harmless no-op, so we
-        // don't need to read the current stage (Layout does NOT import `store`).
-        if (!r.ready) navigate('/setup', { replace: true });
+        if (r.completedAt != null) {
+          if (
+            initialPathnameRef.current === '/setup' &&
+            currentPathnameRef.current === '/setup'
+          ) {
+            navigate('/', { replace: true });
+          }
+        } else if (!r.ready) {
+          navigate('/setup', { replace: true });
+        }
       })
       .catch(() => {
         if (!cancelled) setSetupReady(true);

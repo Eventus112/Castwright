@@ -8,10 +8,11 @@
    rather than polling a mocked api. The api module is still mocked at the
    test boundary for createBookExport / cancelBookExport / LAN URLs. */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
+import QRCode from 'qrcode';
 import { exportsSlice, exportsActions } from '../store/exports-slice';
 import { accountSlice } from '../store/account-slice';
 import { uiSlice } from '../store/ui-slice';
@@ -56,12 +57,24 @@ const mockedApi = api as unknown as {
   getSidecarHealth: ReturnType<typeof vi.fn>;
 };
 
-function makeStore() {
+function makeStore(jobs: BookExportJob[] = [], lanUrls: string[] = []) {
+  const byBookId: Record<string, BookExportJob[]> = {};
+  if (jobs.length > 0) byBookId.demo__sa__test = jobs;
   return configureStore({
     reducer: {
       exports: exportsSlice.reducer,
       account: accountSlice.reducer,
       ui: uiSlice.reducer,
+    },
+    preloadedState: {
+      exports: {
+        ...exportsSlice.getInitialState(),
+        byBookId,
+        lanUrls,
+        lanPort: lanUrls.length > 0 ? 8080 : null,
+      },
+      account: accountSlice.getInitialState(),
+      ui: uiSlice.getInitialState(),
     },
   });
 }
@@ -100,18 +113,243 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof ExportAudiob
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('ExportAudiobookModal', () => {
-  it('renders both tabs and the LAN URL on the Download tab', async () => {
-    renderModal();
+  it('renders both tabs but no clickable LAN-root link or QR before a download is ready', async () => {
+    const qrSpy = vi.spyOn(QRCode, 'toDataURL');
+    const store = makeStore(
+      [
+        makeJob({ id: 'exp_running', format: 'm4b', status: 'in_progress' }),
+        makeJob({
+          id: 'exp_failed',
+          format: 'm4b',
+          status: 'failed',
+          downloadUrl: '/stale-failed-download',
+        }),
+        makeJob({
+          id: 'exp_other_format',
+          format: 'mp3-zip',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_other_format/download',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
     expect(screen.getByTestId('export-tab-download')).toBeInTheDocument();
     expect(screen.getByTestId('export-tab-sync-folder')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByText(/192\.168\.1\.42:8080/)).toBeInTheDocument();
+    expect(screen.getByTestId('export-download-not-ready')).toHaveTextContent(/build download/i);
+    expect(screen.queryByTestId('export-download-link')).toBeNull();
+    expect(screen.queryByTestId('export-download-qr')).toBeNull();
+    expect(qrSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses the latest existing done export immediately and follows format switching', async () => {
+    const qrSpy = vi.spyOn(QRCode, 'toDataURL');
+    const store = makeStore(
+      [
+        makeJob({
+          id: 'exp_failed_newer',
+          format: 'm4b',
+          status: 'failed',
+          downloadUrl: '/wrong-failed',
+          completedAt: '2035-01-01T00:00:00Z',
+        }),
+        makeJob({
+          id: 'exp_m4b_latest',
+          format: 'm4b',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp%20latest/download',
+          completedAt: '2030-01-01T00:00:00Z',
+        }),
+        makeJob({
+          id: 'exp_m4b_old',
+          format: 'm4b',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_old/download',
+          completedAt: '2020-01-01T00:00:00Z',
+        }),
+        makeJob({
+          id: 'exp_mp3',
+          format: 'mp3-zip',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_mp3/download',
+          completedAt: '2029-01-01T00:00:00Z',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+
+    const m4bUrl =
+      'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp%20latest/download';
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute('href', m4bUrl),
+    );
+    await waitFor(() =>
+      expect(qrSpy).toHaveBeenCalledWith(m4bUrl, expect.objectContaining({ margin: 1, scale: 6 })),
+    );
+    expect(mockedApi.createBookExport).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('export-format-mp3-zip'));
+    const mp3Url = 'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp_mp3/download';
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute('href', mp3Url),
+    );
+    await waitFor(() =>
+      expect(qrSpy).toHaveBeenCalledWith(mp3Url, expect.objectContaining({ margin: 1, scale: 6 })),
+    );
+  });
+
+  it('clears a stale QR across deferred, cancelled, and rejected format switches', async () => {
+    const mp3Qr = deferred<string>();
+    const aacQr = deferred<string>();
+    let qrCall = 0;
+    const qrSpy = vi.spyOn(QRCode, 'toDataURL').mockImplementation(
+      (() => {
+        qrCall += 1;
+        if (qrCall === 1) return Promise.resolve('data:image/png;base64,bTRi');
+        return qrCall === 2 ? mp3Qr.promise : aacQr.promise;
+      }) as unknown as typeof QRCode.toDataURL,
+    );
+    const store = makeStore(
+      [
+        makeJob({
+          id: 'exp_m4b',
+          format: 'm4b',
+          status: 'done',
+          downloadUrl: '/m4b',
+        }),
+        makeJob({
+          id: 'exp_mp3',
+          format: 'mp3-zip',
+          status: 'done',
+          downloadUrl: '/mp3',
+        }),
+        makeJob({
+          id: 'exp_aac',
+          format: 'aac-m4a-zip',
+          status: 'done',
+          downloadUrl: '/aac',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('export-download-qr')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('export-format-mp3-zip'));
+    await waitFor(() => expect(qrSpy).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId('export-download-qr')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('export-format-aac-m4a-zip'));
+    await waitFor(() => expect(qrSpy).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      mp3Qr.resolve('data:image/png;base64,c3RhbGU=');
+      await Promise.resolve();
     });
+    expect(screen.queryByTestId('export-download-qr')).toBeNull();
+
+    await act(async () => {
+      aacQr.reject(new Error('QR failed'));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('export-download-qr')).toBeNull();
+  });
+
+  it('allows safe absolute and blob downloads, but never makes a blob QR', async () => {
+    const qrSpy = vi.spyOn(QRCode, 'toDataURL');
+    const store = makeStore(
+      [
+        makeJob({
+          id: 'exp_absolute',
+          format: 'm4b',
+          status: 'done',
+          downloadUrl: 'https://downloads.example.test/book.m4b',
+        }),
+        makeJob({
+          id: 'exp_blob',
+          format: 'mp3-zip',
+          status: 'done',
+          downloadUrl: 'blob:http://localhost/mock-export',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute(
+        'href',
+        'https://downloads.example.test/book.m4b',
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId('export-format-mp3-zip'));
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute(
+        'href',
+        'blob:http://localhost/mock-export',
+      ),
+    );
+    expect(screen.queryByTestId('export-download-qr')).toBeNull();
+    expect(qrSpy).not.toHaveBeenCalledWith(
+      'blob:http://localhost/mock-export',
+      expect.anything(),
+    );
+  });
+
+  it('rejects unsafe download URL protocols', () => {
+    const store = makeStore(
+      [
+        makeJob({
+          id: 'exp_unsafe',
+          format: 'm4b',
+          status: 'done',
+          downloadUrl: 'javascript:alert(1)',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+    expect(screen.queryByTestId('export-download-link')).toBeNull();
+    expect(screen.getByTestId('export-download-not-ready')).toBeInTheDocument();
   });
 
   it('switches to the Save to sync folder tab and renders the input', () => {
@@ -125,7 +363,12 @@ describe('ExportAudiobookModal', () => {
        exportPollMiddleware (not the modal) advances the job. This drives
        that lifecycle by dispatching the updates the middleware would emit
        and asserts the modal re-renders from the store each step. */
-    const started = makeJob({ id: 'exp_view', status: 'in_progress', progress: 0 });
+    const started = makeJob({
+      id: 'exp_view',
+      format: 'm4b',
+      status: 'in_progress',
+      progress: 0,
+    });
     mockedApi.createBookExport.mockResolvedValue(started);
 
     const store = makeStore();
@@ -160,12 +403,62 @@ describe('ExportAudiobookModal', () => {
             status: 'done',
             progress: 1,
             sizeBytes: 4096,
-            downloadUrl: 'blob:demo',
+            format: 'm4b',
+            downloadUrl: '/api/books/demo__sa__test/exports/exp_view/download',
           }),
         ),
       );
     });
     expect(screen.getByText(/done/i)).toBeInTheDocument();
+    const artifactUrl =
+      'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp_view/download';
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute('href', artifactUrl),
+    );
+    await waitFor(() => expect(screen.getByTestId('export-download-qr')).toBeInTheDocument());
+  });
+
+  it('keeps the maximum-timestamp done export when an older active job completes', async () => {
+    const existing = makeJob({
+      id: 'exp_existing_newer',
+      format: 'm4b',
+      status: 'done',
+      downloadUrl: '/api/books/demo__sa__test/exports/exp_existing_newer/download',
+      completedAt: '2030-01-01T00:00:00Z',
+    });
+    const active = makeJob({
+      id: 'exp_active_older',
+      format: 'm4b',
+      status: 'in_progress',
+      createdAt: '2025-01-01T00:00:00Z',
+    });
+    mockedApi.createBookExport.mockResolvedValue(active);
+    const store = makeStore([existing], ['http://192.168.1.42:8080']);
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+    fireEvent.click(screen.getByTestId('export-submit'));
+    await screen.findByTestId('export-active-job');
+
+    act(() => {
+      store.dispatch(
+        exportsActions.exportUpdated({
+          ...active,
+          status: 'done',
+          completedAt: '2026-01-01T00:00:00Z',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_active_older/download',
+        }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute(
+        'href',
+        'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp_existing_newer/download',
+      ),
+    );
   });
 
   it('switches the export format to MP3.ZIP and submits with that format', async () => {
@@ -630,6 +923,55 @@ describe('ExportAudiobookModal — Captions (fs-52)', () => {
     expect(screen.getByTestId('captions-file-format-srt')).toBeInTheDocument();
     expect(screen.getByTestId('captions-granularity-sentence')).toBeInTheDocument();
     expect(screen.getByTestId('captions-scope-whole-book')).toBeInTheDocument();
+  });
+
+  it('uses only the done captions export matching the selected variant', async () => {
+    const store = makeStore(
+      [
+        makeJob({
+          id: 'exp_captions_vtt',
+          format: 'captions',
+          captionFileFormat: 'vtt',
+          captionGranularity: 'word',
+          captionScope: 'per-chapter',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_captions_vtt/download',
+        }),
+        makeJob({
+          id: 'exp_captions_srt',
+          format: 'captions',
+          captionFileFormat: 'srt',
+          captionGranularity: 'sentence',
+          captionScope: 'whole-book',
+          status: 'done',
+          downloadUrl: '/api/books/demo__sa__test/exports/exp_captions_srt/download',
+        }),
+      ],
+      ['http://192.168.1.42:8080'],
+    );
+    render(
+      <Provider store={store}>
+        <ExportAudiobookModal open={true} bookId="demo__sa__test" onClose={vi.fn()} />
+      </Provider>,
+    );
+    fireEvent.click(screen.getByTestId('export-format-captions'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute(
+        'href',
+        'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp_captions_srt/download',
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId('captions-file-format-vtt'));
+    fireEvent.click(screen.getByTestId('captions-granularity-word'));
+    fireEvent.click(screen.getByTestId('captions-scope-per-chapter'));
+    await waitFor(() =>
+      expect(screen.getByTestId('export-download-link')).toHaveAttribute(
+        'href',
+        'http://192.168.1.42:8080/api/books/demo__sa__test/exports/exp_captions_vtt/download',
+      ),
+    );
   });
 
   it('submits the selected caption sub-fields on the export request', async () => {

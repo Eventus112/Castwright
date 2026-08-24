@@ -47,6 +47,70 @@ describe('exportsSlice', () => {
     expect(s.byBookId[known.bookId].map((j) => j.id)).toEqual(['exp_unknown', 'exp_known']);
   });
 
+  it('a newer done update revokes only older done rows with the same server key', () => {
+    const oldDone = makeJob({
+      id: 'exp_old_done',
+      status: 'done',
+      completedAt: '2025-01-01T00:00:00Z',
+    });
+    const newer = makeJob({ id: 'exp_newer', createdAt: '2025-02-01T00:00:00Z' });
+    const parallel = makeJob({ id: 'exp_parallel', status: 'in_progress' });
+    const failed = makeJob({ id: 'exp_failed', status: 'failed' });
+    const otherFormat = makeJob({ id: 'exp_m4b', format: 'm4b', status: 'done' });
+    let s = exportsSlice.reducer(
+      initial,
+      exportsActions.exportsHydrated({
+        bookId: oldDone.bookId,
+        jobs: [newer, parallel, failed, oldDone, otherFormat],
+      }),
+    );
+
+    s = exportsSlice.reducer(
+      s,
+      exportsActions.exportUpdated({
+        ...newer,
+        status: 'done',
+        completedAt: '2025-02-01T00:00:00Z',
+      }),
+    );
+    expect(s.byBookId[oldDone.bookId].map((job) => job.id)).toEqual([
+      'exp_newer',
+      'exp_parallel',
+      'exp_failed',
+      'exp_m4b',
+    ]);
+
+    s = exportsSlice.reducer(
+      s,
+      exportsActions.exportDismissed({ bookId: newer.bookId, exportId: newer.id }),
+    );
+    expect(s.byBookId[oldDone.bookId].map((job) => job.id)).not.toContain('exp_old_done');
+  });
+
+  it('keeps distinct captions variants when one variant completes', () => {
+    const srt = makeJob({
+      id: 'exp_srt',
+      format: 'captions',
+      captionFileFormat: 'srt',
+      captionGranularity: 'sentence',
+      captionScope: 'whole-book',
+      status: 'done',
+    });
+    const vtt = makeJob({
+      id: 'exp_vtt',
+      format: 'captions',
+      captionFileFormat: 'vtt',
+      captionGranularity: 'word',
+      captionScope: 'per-chapter',
+      status: 'done',
+    });
+    const s = exportsSlice.reducer(
+      initial,
+      exportsActions.exportsHydrated({ bookId: srt.bookId, jobs: [srt, vtt] }),
+    );
+    expect(s.byBookId[srt.bookId].map((job) => job.id)).toEqual(['exp_srt', 'exp_vtt']);
+  });
+
   it('exportDismissed drops the matching job', () => {
     const job = makeJob();
     let s = exportsSlice.reducer(initial, exportsActions.exportStarted(job));
@@ -80,6 +144,30 @@ describe('exportsSlice', () => {
         }),
       );
       expect(s1.byBookId['b1'].map((j) => j.id)).toEqual(['exp_2', 'exp_1']);
+    });
+
+    it('drops an older revoked done row for the same format', () => {
+      const s = exportsSlice.reducer(
+        exportsSlice.getInitialState(),
+        exportsActions.exportsHydrated({
+          bookId: 'b1',
+          jobs: [
+            makeJob({
+              id: 'exp_new',
+              bookId: 'b1',
+              status: 'done',
+              completedAt: '2030-01-01T00:00:00Z',
+            }),
+            makeJob({
+              id: 'exp_old',
+              bookId: 'b1',
+              status: 'done',
+              completedAt: '2020-01-01T00:00:00Z',
+            }),
+          ],
+        }),
+      );
+      expect(s.byBookId['b1'].map((job) => job.id)).toEqual(['exp_new']);
     });
   });
 
