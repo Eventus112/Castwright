@@ -26,8 +26,14 @@ import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { customAlphabet } from 'nanoid';
 import { findBookByBookId } from '../workspace/scan.js';
-import { WORKSPACE_ROOT, dotAudiobook } from '../workspace/paths.js';
+import {
+  WORKSPACE_ROOT,
+  bookExportManifestsDir,
+  bookExportsDir,
+  dotAudiobook,
+} from '../workspace/paths.js';
 import { readJson, writeJsonAtomic } from '../workspace/state-io.js';
+import { sanitizeIdSegment } from '../util/safe-path.js';
 
 /* Crockford-style base32: 0-9 + A-Z minus I, L, O, U.  No vowels, no easily-
    confused letters; uppercase only (the URL surface case-folds anyway).
@@ -78,36 +84,65 @@ interface ExportManifestForShare {
   createdAt: string;
 }
 
-/** Walk a book's exports dir and return the path to the most-recent
-    successful M4B file. Returns null when nothing is ready. */
-async function findLatestM4b(bookDir: string): Promise<string | null> {
-  const exportsRoot = join(dotAudiobook(bookDir), 'exports');
-  if (!existsSync(exportsRoot)) return null;
-  let entries: string[] = [];
-  try {
-    entries = await readdir(exportsRoot);
-  } catch {
-    return null;
-  }
-  let best: { path: string; ts: string } | null = null;
-  for (const name of entries) {
-    const manifestFile = join(exportsRoot, name, 'manifest.json');
-    if (!existsSync(manifestFile)) continue;
+async function latestDoneM4bFromManifests(
+  manifests: Array<{ manifest: string; artifactRoot: string }>,
+  bookId: string,
+): Promise<string | null> {
+  let best: { path: string; ts: number } | null = null;
+  for (const candidate of manifests) {
     try {
-      const raw = await readFile(manifestFile, 'utf8');
+      const raw = await readFile(candidate.manifest, 'utf8');
       const job = JSON.parse(raw) as ExportManifestForShare;
-      if (job.format !== 'm4b' || job.status !== 'done') continue;
-      const artifact = join(exportsRoot, name, job.filename);
+      if (job.bookId !== bookId || job.format !== 'm4b' || job.status !== 'done') continue;
+      if (typeof job.filename !== 'string' || !job.filename.toLowerCase().endsWith('.m4b')) continue;
+      const safeFilename = sanitizeIdSegment(job.filename);
+      if (safeFilename !== job.filename) continue;
+      const artifact = join(candidate.artifactRoot, safeFilename);
       if (!existsSync(artifact)) continue;
-      const ts = job.completedAt ?? job.createdAt;
-      if (!best || ts > best.ts) {
-        best = { path: artifact, ts };
-      }
+      const ts = Date.parse(job.completedAt ?? job.createdAt);
+      if (!Number.isFinite(ts)) continue;
+      if (!best || ts > best.ts) best = { path: artifact, ts };
     } catch {
       /* Corrupt manifest — skip. */
     }
   }
   return best?.path ?? null;
+}
+
+/** Return the latest successful M4B from the current flat export layout,
+    falling back to the legacy per-export layout for older workspaces. */
+async function findLatestM4b(bookDir: string, bookId: string): Promise<string | null> {
+  const manifestsRoot = bookExportManifestsDir(bookDir);
+  let entries: string[] = [];
+  try {
+    entries = await readdir(manifestsRoot);
+  } catch {
+    entries = [];
+  }
+  const current = await latestDoneM4bFromManifests(
+    entries
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => ({
+        manifest: join(manifestsRoot, name),
+        artifactRoot: bookExportsDir(bookDir),
+      })),
+    bookId,
+  );
+  if (current) return current;
+
+  const legacyRoot = join(dotAudiobook(bookDir), 'exports');
+  try {
+    entries = await readdir(legacyRoot);
+  } catch {
+    return null;
+  }
+  return latestDoneM4bFromManifests(
+    entries.map((name) => {
+      const artifactRoot = join(legacyRoot, name);
+      return { manifest: join(artifactRoot, 'manifest.json'), artifactRoot };
+    }),
+    bookId,
+  );
 }
 
 export const shareRouter = Router();
@@ -168,7 +203,7 @@ sharePublicRouter.get('/share/:slug', async (req: Request, res: Response) => {
   const located = await findBookByBookId(entry.bookId);
   if (!located) return res.status(404).json({ error: 'book_not_found' });
 
-  const m4bPath = await findLatestM4b(located.bookDir);
+  const m4bPath = await findLatestM4b(located.bookDir, located.state.bookId);
   if (!m4bPath) {
     return res.status(409).json({
       error: 'no_m4b_ready',
@@ -187,8 +222,8 @@ sharePublicRouter.get('/share/:slug', async (req: Request, res: Response) => {
         )}"`,
         'Cache-Control': 'no-cache',
       },
-      /* The M4B lives under the book's `.audiobook/exports/` dir. Express 5's
-         send defaults dotfiles:'ignore', which 404s any path with a
+      /* A legacy-fallback M4B may live under `.audiobook/exports/`. Express
+         5's send defaults dotfiles:'ignore', which 404s any path with a
          dot-segment (Express 4's res.sendFile served it) — allow it. */
       dotfiles: 'allow',
     },

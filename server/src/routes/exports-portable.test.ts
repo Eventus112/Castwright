@@ -22,7 +22,7 @@ import request from 'supertest';
 
 const AUTHOR = 'Portable Test Author';
 const SERIES = 'Standalones';
-const TITLE = 'Portable Test Book';
+const TITLE = 'Портативная тестовая книга';
 
 let workspaceRoot: string;
 let bookDir: string;
@@ -98,7 +98,14 @@ describe('GET /api/books/:bookId/export/portable', () => {
       });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toBe('application/zip');
-    expect(res.headers['content-disposition']).toMatch(/attachment; filename=".*\.portable\.zip"/);
+    const disposition = res.headers['content-disposition'] as string;
+    expect(disposition).toMatch(
+      /^attachment; filename="[\x20-\x7e]+\.portable\.zip"; filename\*=UTF-8''/,
+    );
+    expect(disposition).toContain(
+      `filename*=UTF-8''${encodeURIComponent('портативная-тестовая-книга.portable.zip')}`,
+    );
+    expect(disposition).not.toMatch(/[А-Яа-яЁё]/);
     /* Local zip header magic: 'PK\x03\x04'. */
     const body = res.body as Buffer;
     expect(body[0]).toBe(0x50);

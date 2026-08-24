@@ -35,6 +35,8 @@ const TITLE = 'Streaming Bonus';
 let workspaceRoot: string;
 let bookDir: string;
 let exportsDir: string;
+let currentExportsDir: string;
+let exportManifestsDir: string;
 let app: Express;
 let bookId: string;
 let resetShareLinks: () => Promise<void>;
@@ -59,6 +61,8 @@ beforeAll(async () => {
 
   bookDir = join(workspaceRoot, 'books', AUTHOR, SERIES, TITLE);
   exportsDir = join(bookDir, '.audiobook', 'exports');
+  currentExportsDir = join(bookDir, 'exports');
+  exportManifestsDir = join(bookDir, '.audiobook', 'export-manifests');
   mkdirSync(join(bookDir, '.audiobook'), { recursive: true });
 
   writeFileSync(
@@ -90,6 +94,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetShareLinks();
   if (existsSync(exportsDir)) rmSync(exportsDir, { recursive: true, force: true });
+  if (existsSync(currentExportsDir)) rmSync(currentExportsDir, { recursive: true, force: true });
+  if (existsSync(exportManifestsDir)) rmSync(exportManifestsDir, { recursive: true, force: true });
 });
 
 afterAll(() => {
@@ -120,6 +126,43 @@ function seedM4bExport(opts?: {
     JSON.stringify({
       id: exportId,
       bookId,
+      format,
+      destination: 'download',
+      status,
+      filename,
+      sizeBytes: FAKE_M4B_BYTES.length,
+      progress: status === 'done' ? 1 : 0.5,
+      downloadUrl: null,
+      syncPath: null,
+      errorReason: null,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      completedAt: status === 'done' ? (opts?.completedAt ?? new Date().toISOString()) : null,
+    }),
+  );
+  return artifact;
+}
+
+function seedCurrentM4bExport(opts?: {
+  exportId?: string;
+  filename?: string;
+  status?: 'done' | 'failed' | 'in_progress';
+  format?: 'm4b' | 'mp3-zip';
+  completedAt?: string;
+  manifestBookId?: string;
+}): string {
+  const exportId = opts?.exportId ?? `exp_current_${Date.now().toString(36)}`;
+  const filename = opts?.filename ?? 'streaming-bonus.m4b';
+  const status = opts?.status ?? 'done';
+  const format = opts?.format ?? 'm4b';
+  mkdirSync(currentExportsDir, { recursive: true });
+  mkdirSync(exportManifestsDir, { recursive: true });
+  const artifact = join(currentExportsDir, filename);
+  writeFileSync(artifact, FAKE_M4B_BYTES);
+  writeFileSync(
+    join(exportManifestsDir, `${exportId}.json`),
+    JSON.stringify({
+      id: exportId,
+      bookId: opts?.manifestBookId ?? bookId,
       format,
       destination: 'download',
       status,
@@ -172,6 +215,52 @@ describe('POST /api/books/:bookId/share', () => {
 });
 
 describe('GET /share/:slug', () => {
+  it('streams an M4B from the current flat exports + export-manifests layout', async () => {
+    const artifact = seedCurrentM4bExport();
+    const CURRENT_BYTES = Buffer.from('current flat-layout m4b bytes', 'utf8');
+    writeFileSync(artifact, CURRENT_BYTES);
+    const mint = await request(app).post(`/api/books/${bookId}/share`).send({});
+
+    const res = await request(app)
+      .get(`/share/${mint.body.slug}`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+
+    expect(res.status).toBe(200);
+    expect((res.body as Buffer).equals(CURRENT_BYTES)).toBe(true);
+  });
+
+  it('selects the latest done M4B manifest in the current layout', async () => {
+    seedCurrentM4bExport({
+      exportId: 'exp_current_older',
+      filename: 'current-older.m4b',
+      completedAt: '2020-01-01T00:00:00.000Z',
+    });
+    const newer = seedCurrentM4bExport({
+      exportId: 'exp_current_newer',
+      filename: 'current-newer.m4b',
+      completedAt: '2030-01-01T00:00:00.000Z',
+    });
+    const NEWER_BYTES = Buffer.from('newest current-layout m4b', 'utf8');
+    writeFileSync(newer, NEWER_BYTES);
+    const mint = await request(app).post(`/api/books/${bookId}/share`).send({});
+
+    const res = await request(app)
+      .get(`/share/${mint.body.slug}`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    expect((res.body as Buffer).equals(NEWER_BYTES)).toBe(true);
+  });
+
   it('streams the M4B bytes with Content-Type: audio/mp4', async () => {
     seedM4bExport();
     const mint = await request(app).post(`/api/books/${bookId}/share`).send({});
@@ -246,5 +335,37 @@ describe('GET /share/:slug', () => {
     const res = await request(app).get(`/share/${mint.body.slug}`);
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('no_m4b_ready');
+  });
+
+  it('ignores unsafe or cross-book current manifests and keeps the legacy fallback', async () => {
+    seedCurrentM4bExport({ filename: 'wrong-book.m4b', manifestBookId: 'another-book' });
+    mkdirSync(exportManifestsDir, { recursive: true });
+    writeFileSync(
+      join(exportManifestsDir, 'unsafe.json'),
+      JSON.stringify({
+        id: 'unsafe',
+        bookId,
+        format: 'm4b',
+        status: 'done',
+        filename: '../outside.m4b',
+        createdAt: '2035-01-01T00:00:00.000Z',
+        completedAt: '2035-01-01T00:00:00.000Z',
+      }),
+    );
+    const legacy = seedM4bExport({ filename: 'safe-legacy.m4b' });
+    const LEGACY_BYTES = Buffer.from('safe legacy fallback', 'utf8');
+    writeFileSync(legacy, LEGACY_BYTES);
+    const mint = await request(app).post(`/api/books/${bookId}/share`).send({});
+
+    const res = await request(app)
+      .get(`/share/${mint.body.slug}`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    expect((res.body as Buffer).equals(LEGACY_BYTES)).toBe(true);
   });
 });

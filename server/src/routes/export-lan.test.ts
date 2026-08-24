@@ -108,6 +108,72 @@ describe('GET /api/export/lan — reflects the ACTUAL bound runtime, not the req
     expect(res.body.port).toBe(9443);
   });
 
+  it('prioritises the reachable request Origin ahead of Docker interface URLs', async () => {
+    setLanRuntime({ httpsActive: false, port: 8080 });
+    const res = await request(makeApp())
+      .get('/api/export/lan')
+      .set('Origin', 'http://192.168.1.42:8080')
+      .set('Host', '172.21.0.2:8080');
+    expect(res.status).toBe(200);
+    expect(res.body.urls[0]).toBe('http://192.168.1.42:8080');
+    expect(res.body.protocol).toBe('http');
+    expect(res.body.port).toBe(8080);
+  });
+
+  it('uses a valid forwarded host and protocol when Origin is absent', async () => {
+    setLanRuntime({ httpsActive: true, port: 8443 });
+    const res = await request(makeApp())
+      .get('/api/export/lan')
+      .set('X-Forwarded-Host', 'castwright.local')
+      .set('X-Forwarded-Proto', 'https');
+    expect(res.status).toBe(200);
+    expect(res.body.urls[0]).toBe('https://castwright.local');
+    expect(res.body.protocol).toBe('https');
+    expect(res.body.port).toBe(8443);
+  });
+
+  it('rejects loopback and malformed request hosts from the advertised URLs', async () => {
+    setLanRuntime({ httpsActive: false, port: 8080 });
+    const loopback = await request(makeApp())
+      .get('/api/export/lan')
+      .set('Origin', 'http://localhost:8080')
+      .set('X-Forwarded-Host', '127.0.0.1:8080')
+      .set('Host', '0.0.0.0:8080');
+    expect(loopback.status).toBe(200);
+    expect(loopback.body.urls).not.toContain('http://localhost:8080');
+    expect(loopback.body.urls).not.toContain('http://127.0.0.1:8080');
+    expect(loopback.body.urls).not.toContain('http://0.0.0.0:8080');
+
+    const ipv6Loopback = await request(makeApp())
+      .get('/api/export/lan')
+      .set('Origin', 'http://[::1]:8080')
+      .set('Host', '127.0.0.1:8080');
+    expect(ipv6Loopback.status).toBe(200);
+    expect(ipv6Loopback.body.urls).not.toContain('http://[::1]:8080');
+
+    for (const mapped of ['[::ffff:7f00:1]', '[::ffff:127.0.0.1]']) {
+      const mappedLoopback = await request(makeApp())
+        .get('/api/export/lan')
+        .set('Origin', `http://${mapped}:8080`)
+        .set('Host', '127.0.0.1:8080');
+      expect(mappedLoopback.status).toBe(200);
+      expect(mappedLoopback.body.urls).not.toContain(`http://[::ffff:7f00:1]:8080`);
+    }
+
+    const tailscale = await request(makeApp())
+      .get('/api/export/lan')
+      .set('Origin', 'http://100.100.10.20:8080');
+    expect(tailscale.status).toBe(200);
+    expect(tailscale.body.urls[0]).toBe('http://100.100.10.20:8080');
+
+    const malformed = await request(makeApp())
+      .get('/api/export/lan')
+      .set('X-Forwarded-Host', 'user@example.com')
+      .set('Host', '127.0.0.1:8080');
+    expect(malformed.status).toBe(200);
+    expect(malformed.body.urls).not.toContain('http://user@example.com');
+  });
+
   it('the CRITICAL regression: LAN requested but certs missing → HTTP, never advertises https:8443', async () => {
     // requested flag on, but the server bound loopback HTTP because certs were absent
     process.env.LAN_HTTPS = '1';

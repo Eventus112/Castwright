@@ -1,7 +1,8 @@
 /* GET /api/export/lan — enumerate reachable LAN URLs.
 
-   The export modal renders the first non-loopback IPv4 URL as a clickable
-   link + QR code so the user can scan it with Chrome on their Android
+   The export modal renders the first reachable request-origin URL (or the
+   first enumerated non-loopback IPv4 URL) as a clickable link + QR code so
+   the user can scan it with Chrome on their Android
    phone, download the audiobook zip over Wi-Fi, and open it with the
    PocketBook Reader Android app. We filter out:
    - 127.x  (loopback — useless from another device)
@@ -24,6 +25,7 @@
    / mic / camera APIs become available on phone Safari/Chrome). */
 
 import { networkInterfaces } from 'node:os';
+import { isIP } from 'node:net';
 import { readFileSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { Router } from 'express';
@@ -79,6 +81,77 @@ export function enumerateLanUrls(port: number, protocol: 'http' | 'https' = 'htt
   return { urls, port, protocol };
 }
 
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  const first = Array.isArray(value) ? value[0] : value?.split(',')[0];
+  const trimmed = first?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function isBlockedIpv4(octets: number[]): boolean {
+  return octets[0] === 127 || octets.every((octet) => octet === 0);
+}
+
+function mappedIpv4Octets(host: string): number[] | undefined {
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (hex) {
+    const high = Number.parseInt(hex[1], 16);
+    const low = Number.parseInt(hex[2], 16);
+    return [high >> 8, high & 0xff, low >> 8, low & 0xff];
+  }
+  const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(host);
+  if (dotted && isIP(dotted[1]) === 4) return dotted[1].split('.').map(Number);
+  return undefined;
+}
+
+function isReachableHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  const family = isIP(host);
+  if (family === 4 && isBlockedIpv4(host.split('.').map(Number))) return false;
+  if (family === 6) {
+    if (host === '::' || host === '::1') return false;
+    const mapped = mappedIpv4Octets(host);
+    if (mapped && isBlockedIpv4(mapped)) return false;
+  }
+  return host.length > 0;
+}
+
+function validReachableOrigin(raw: string | undefined): string | undefined {
+  if (!raw || /\s/.test(raw)) return undefined;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+      return undefined;
+    }
+    return isReachableHostname(url.hostname) ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestReachableOrigin(
+  req: Request,
+  runtimeProtocol: 'http' | 'https',
+): string | undefined {
+  const fromOrigin = validReachableOrigin(firstHeaderValue(req.headers.origin));
+  if (fromOrigin) return fromOrigin;
+
+  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto']);
+  const protocol = forwardedProto === 'http' || forwardedProto === 'https'
+    ? forwardedProto
+    : runtimeProtocol;
+  for (const rawHost of [
+    firstHeaderValue(req.headers['x-forwarded-host']),
+    firstHeaderValue(req.headers.host),
+  ]) {
+    if (!rawHost || /[\s/@?#\\]/.test(rawHost)) continue;
+    const candidate = validReachableOrigin(`${protocol}://${rawHost}`);
+    if (candidate) return candidate;
+  }
+  return undefined;
+}
+
 /* srv-20 — the configured shared-secret token (or undefined). Read directly
    from env (not via lan-auth) to avoid a circular import (lan-auth already
    imports isLanHttpsEnabled from here). */
@@ -99,7 +172,7 @@ export function lanCaFingerprint(): string | undefined {
   }
 }
 
-exportLanRouter.get('/lan', (_req: Request, res: Response) => {
+exportLanRouter.get('/lan', (req: Request, res: Response) => {
   // Advertise what the server ACTUALLY bound, not the requested flag: if LAN was
   // requested but certs were missing, the server degraded to loopback HTTP and
   // handing out https://<ip>:8443 URLs would be dead links.
@@ -107,8 +180,14 @@ exportLanRouter.get('/lan', (_req: Request, res: Response) => {
   const protocol: 'http' | 'https' = httpsActive ? 'https' : 'http';
   const token = lanAuthToken();
   const caFingerprint = lanCaFingerprint();
+  const lan = enumerateLanUrls(port, protocol);
+  const requestOrigin = requestReachableOrigin(req, protocol);
+  const urls = requestOrigin
+    ? [requestOrigin, ...lan.urls.filter((url) => url !== requestOrigin)]
+    : lan.urls;
   res.json({
-    ...enumerateLanUrls(port, protocol),
+    ...lan,
+    urls,
     ...(token !== undefined ? { token } : {}),
     ...(caFingerprint !== undefined ? { caFingerprint } : {}),
   });

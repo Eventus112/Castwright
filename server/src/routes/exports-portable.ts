@@ -36,6 +36,15 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 
 export const portableExportRouter = Router();
 
+function attachmentDisposition(filename: string): string {
+  const fallback = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  const encoded = encodeURIComponent(filename).replace(
+    /['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
 /** GET /api/books/:bookId/export/portable — stream the bundle. */
 portableExportRouter.get('/:bookId/export/portable', async (req: Request, res: Response) => {
   const located = await findBookByBookId(req.params.bookId);
@@ -56,7 +65,7 @@ portableExportRouter.get('/:bookId/export/portable', async (req: Request, res: R
     });
 
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.setHeader('Content-Disposition', attachmentDisposition(downloadName));
     res.setHeader('Content-Length', result.buffer.length.toString());
     res.setHeader('Cache-Control', 'no-cache');
     res.status(200).send(result.buffer);
