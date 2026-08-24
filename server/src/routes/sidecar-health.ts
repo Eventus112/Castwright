@@ -124,6 +124,7 @@ interface SidecarHealthBody {
      probe (see that function's doc comment). */
   coqui_weights_present?: boolean;
   kokoro_package_installed?: boolean;
+  kokoro_weights_present?: boolean;
   whisper_package_installed?: boolean;
   /* #1965 — the same sticky, real-import-attempt truth as `coqui_import_ok`
      above, for the three engines that only had the find_spec probe. Unlike
@@ -240,9 +241,13 @@ const QWEN_INSTALL_STATES: readonly QwenInstallState[] = [
 /* Normalise the sidecar's qwen_install_state. An old sidecar omits the field
    entirely → 'not-installed' so a stale build never reports Qwen as ready. */
 function normaliseQwenInstallState(raw: unknown): QwenInstallState {
+  return qwenInstallStateCapability(raw) ?? 'not-installed';
+}
+
+function qwenInstallStateCapability(raw: unknown): QwenInstallState | undefined {
   return QWEN_INSTALL_STATES.includes(raw as QwenInstallState)
     ? (raw as QwenInstallState)
-    : 'not-installed';
+    : undefined;
 }
 
 /* Derive the install-state the resolver cache should trust from a /health body.
@@ -351,7 +356,9 @@ export interface SidecarHealthResult {
   qwenInstallState?: QwenInstallState;
   /* Task 8 — per-engine pip-importability forwarded from the sidecar body. */
   coquiPackageInstalled?: boolean;
+  coquiWeightsPresent?: boolean;
   kokoroPackageInstalled?: boolean;
+  kokoroWeightsPresent?: boolean;
   whisperPackageInstalled?: boolean;
   /* #1963 — the sticky real-import-attempt signal (see `coqui_import_ok` on
      SidecarHealthBody above), forwarded so Node-side consumers other than
@@ -417,6 +424,7 @@ export async function probeSidecarHealth(): Promise<SidecarHealthResult> {
     }
     const body = (await response.json().catch(() => ({}))) as SidecarHealthBody;
     const qwenInstallState = deriveQwenInstallState(body);
+    const qwenStateCapability = qwenInstallStateCapability(body.qwen_install_state);
     /* A loaded model implies its package + weights are on disk — keep the
        forwarded booleans consistent with the derived 'loaded' state so the UI
        never shows the contradictory "loaded but not-installed" combination a
@@ -468,15 +476,33 @@ export async function probeSidecarHealth(): Promise<SidecarHealthResult> {
          unchanged: a loaded model still implies its package is present. */
       qwenPackageInstalled:
         qwenLoaded ||
-        (typeof body.qwen_package_installed === 'boolean' ? body.qwen_package_installed : undefined),
-      qwenWeightsPresent: qwenLoaded || body.qwen_weights_present === true,
+        (typeof body.qwen_package_installed === 'boolean'
+          ? body.qwen_package_installed
+          : qwenStateCapability
+            ? qwenStateCapability !== 'not-installed'
+            : undefined),
+      qwenWeightsPresent:
+        qwenLoaded ||
+        (typeof body.qwen_weights_present === 'boolean'
+          ? body.qwen_weights_present
+          : qwenStateCapability
+            ? qwenStateCapability === 'ready' || qwenStateCapability === 'loaded'
+            : undefined),
       qwenInstallState: qwenInstallState,
       coquiPackageInstalled: typeof body.coqui_package_installed === 'boolean' ? body.coqui_package_installed : undefined,
+      coquiWeightsPresent:
+        body.model_loaded === true ||
+        (typeof body.coqui_weights_present === 'boolean' ? body.coqui_weights_present : undefined),
       /* #1963 — normalise absent (older sidecar) to null so every consumer
          sees the same "no real import attempt to trust" value regardless of
          which shape the wire omission took. */
       coquiImportOk: typeof body.coqui_import_ok === 'boolean' ? body.coqui_import_ok : null,
       kokoroPackageInstalled: typeof body.kokoro_package_installed === 'boolean' ? body.kokoro_package_installed : undefined,
+      kokoroWeightsPresent:
+        body.kokoro_loaded === true ||
+        (typeof body.kokoro_weights_present === 'boolean'
+          ? body.kokoro_weights_present
+          : undefined),
       whisperPackageInstalled: typeof body.whisper_package_installed === 'boolean' ? body.whisper_package_installed : undefined,
       /* #1965 — same absent → null normalisation as coquiImportOk above, for
          the same reason: every consumer sees ONE "no real import attempt to

@@ -39,6 +39,10 @@ export interface EngineStatus {
       has to NAME the fault (Setup checker, Admin console) reads this instead, so the
       two surfaces can't disagree about which of "missing" or "broken" it is. */
   packageFault: PackageFault;
+  /** Whether a reachable external sidecar supplied enough capability data to
+      determine availability. Loaded or explicitly package-absent is
+      conclusive; other incomplete legacy package/weights data is unknown. */
+  availabilityKnown?: boolean;
 }
 
 /** #1999 — the shared missing-vs-broken classification, in the one precedence order
@@ -101,6 +105,7 @@ export interface EngineProbeResult {
   loaded: boolean;
   importOk: boolean | undefined;
   specPresent: boolean | undefined;
+  availabilityKnown?: boolean;
 }
 
 export interface BuildModelsStatusInput {
@@ -131,7 +136,12 @@ export function buildModelsStatus(input: BuildModelsStatusInput): ModelsStatus {
     const packageBroken =
       p.packageOnDisk &&
       (p.importOk === false || (p.importOk === undefined && p.specPresent === false));
-    engines[entry.id] = { state, packageBroken, packageFault: classifyPackageFault(p.importOk, p.specPresent) };
+    engines[entry.id] = {
+      state,
+      packageBroken,
+      packageFault: classifyPackageFault(p.importOk, p.specPresent),
+      availabilityKnown: p.availabilityKnown,
+    };
   }
   return {
     runtime: input.runtime,

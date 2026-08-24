@@ -18,19 +18,19 @@ describe('diagnoseSidecar', () => {
   });
 
   it('reports python-missing when the venv is absent and no 3.12 interpreter is found', () => {
-    const r = diagnoseSidecar({ ...READY, venvPresent: false, pythonFound: false });
+    const r = diagnoseSidecar({ ...READY, venvPresent: false, pythonFound: false, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'python-missing' });
     expect(r.action).toBeUndefined();
   });
 
   it('reports venv-missing (not python-missing) when the venv is absent but python is found', () => {
-    const r = diagnoseSidecar({ ...READY, venvPresent: false, pythonFound: true });
+    const r = diagnoseSidecar({ ...READY, venvPresent: false, pythonFound: true, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'venv-missing' });
     expect(r.action).toMatchObject({ kind: 'venv-bootstrap' });
   });
 
   it('reports venv-broken when the venv exists but the core package is not installed', () => {
-    const r = diagnoseSidecar({ ...READY, venvPresent: true, corePackageInstalled: false });
+    const r = diagnoseSidecar({ ...READY, venvPresent: true, corePackageInstalled: false, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'venv-broken' });
     expect(r.action).toMatchObject({ kind: 'venv-bootstrap' });
   });
@@ -42,12 +42,13 @@ describe('diagnoseSidecar', () => {
       pythonFound: false,
       corePackageInstalled: false,
       supervisorExhausted: true,
+      sidecarReachable: false,
     });
     expect(r.cause).toBe('python-missing');
   });
 
   it('reports supervisor-exhausted with a sidecar-restart action', () => {
-    const r = diagnoseSidecar({ ...READY, supervisorExhausted: true });
+    const r = diagnoseSidecar({ ...READY, supervisorExhausted: true, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'supervisor-exhausted' });
     expect(r.action).toMatchObject({ kind: 'sidecar-restart' });
   });
@@ -58,13 +59,13 @@ describe('diagnoseSidecar', () => {
     // returns 409 for this cause (sidecar-health.ts's tripEvent() branch) rather
     // than spawning a fresh child. Attaching a `sidecar-restart` action here would
     // show a working-looking button that always fails — this is text-only guidance.
-    const r = diagnoseSidecar({ ...READY, supervisorTripped: true });
+    const r = diagnoseSidecar({ ...READY, supervisorTripped: true, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'supervisor-tripped' });
     expect(r.action).toBeUndefined();
   });
 
   it('supervisor-exhausted takes priority over supervisor-tripped when both are somehow true', () => {
-    const r = diagnoseSidecar({ ...READY, supervisorExhausted: true, supervisorTripped: true });
+    const r = diagnoseSidecar({ ...READY, supervisorExhausted: true, supervisorTripped: true, sidecarReachable: false });
     expect(r.cause).toBe('supervisor-exhausted');
   });
 
@@ -78,6 +79,17 @@ describe('diagnoseSidecar', () => {
     const r = diagnoseSidecar({ ...READY, supervisorActive: false, sidecarReachable: false });
     expect(r).toMatchObject({ status: 'fail', cause: 'unreachable-no-supervisor' });
     expect(r.action).toMatchObject({ kind: 'navigate', href: '#/models' });
+  });
+
+  it('a reachable external sidecar outranks missing local Python, venv, and core package', () => {
+    const r = diagnoseSidecar({
+      ...READY,
+      venvPresent: false,
+      pythonFound: false,
+      corePackageInstalled: false,
+      supervisorActive: false,
+    });
+    expect(r).toMatchObject({ status: 'pass', cause: 'pass' });
   });
 });
 
@@ -109,7 +121,12 @@ describe('probePython312Cached', () => {
 });
 
 const SIDECAR_PASS = diagnoseSidecar(READY);
-const SIDECAR_VENV_MISSING = diagnoseSidecar({ ...READY, venvPresent: false, pythonFound: true });
+const SIDECAR_VENV_MISSING = diagnoseSidecar({
+  ...READY,
+  venvPresent: false,
+  pythonFound: true,
+  sidecarReachable: false,
+});
 const SIDECAR_TRANSIENT = diagnoseSidecar({ ...READY, sidecarReachable: false });
 const SIDECAR_NO_SUPERVISOR = diagnoseSidecar({ ...READY, supervisorActive: false, sidecarReachable: false });
 

@@ -123,6 +123,25 @@ describe('buildModelsStatus', () => {
     expect(s.info.vramTotalMb).toBe(8192);
   });
 
+  it('preserves unknown external availability alongside the coarse state', () => {
+    const unknown = {
+      packageOnDisk: false,
+      weightsOnDisk: false,
+      loaded: false,
+      importOk: undefined,
+      specPresent: undefined,
+      availabilityKnown: false,
+    };
+    const s = buildModelsStatus({
+      ...base,
+      engines: { kokoro: unknown, qwen: unknown, coqui: unknown },
+    });
+    expect(s.engines.kokoro).toMatchObject({
+      state: 'not-installed',
+      availabilityKnown: false,
+    });
+  });
+
   it('surfaces a recommendation derived from vramTotalMb', () => {
     const probe = { packageOnDisk: false, weightsOnDisk: false, loaded: false, importOk: undefined, specPresent: undefined };
     const engines = { kokoro: probe, qwen: probe, coqui: probe };

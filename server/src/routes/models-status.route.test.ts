@@ -71,20 +71,110 @@ describe('computeModelsStatus', () => {
     expect(probeSidecarHealth).toHaveBeenCalledTimes(1);
   });
 
-  it('skips probeSidecarHealth entirely when the venv is absent, deriving runtime.process from supervisor state instead', async () => {
-    /* Regression this catches: computeModelsStatus must make exactly ONE
-       probeSidecarHealth() call total (see the "no second probe" invariant
-       documented above gpuDetail() in models-status.ts) — venv-absent means
-       there's no sidecar to probe at all, so the call must be skipped, not
-       just deduplicated. Supervisor active but not tripped/exhausted drives
-       deriveProcess() down the 'starting' branch. */
+  it('trusts a reachable external sidecar when the web container has no local venv', async () => {
     sidecarVenvPresent.mockReturnValue(false);
-    getActiveSupervisor.mockReturnValue({ tripEvent: () => null, exhaustedEvent: () => false });
+    probeSidecarHealth.mockResolvedValue({
+      status: 'reachable',
+      qwenLoaded: false,
+      qwenPackageInstalled: true,
+      qwenWeightsPresent: true,
+      coquiPackageInstalled: false,
+      kokoroPackageInstalled: false,
+      vramTotalMb: 12_288,
+      device: 'cuda',
+    });
 
     const s = await computeModelsStatus('/repo');
 
-    expect(probeSidecarHealth).not.toHaveBeenCalled();
-    expect(s.runtime.process).toBe('starting');
+    expect(probeSidecarHealth).toHaveBeenCalledTimes(1);
+    expect(s.runtime.installedOnDisk).toBe(true);
+    expect(s.runtime.pythonFound).toBe(true);
+    expect(findPython312).not.toHaveBeenCalled();
+    expect(s.runtime.process).toBe('ready');
+    expect(s.engines.qwen.state).toBe('ready');
+    expect(s.engines.qwen.packageFault).toBe('ok');
+    expect(s.info.vramTotalMb).toBe(12_288);
+  });
+
+  it('uses live Kokoro weights for a cold external sidecar', async () => {
+    sidecarVenvPresent.mockReturnValue(false);
+    probeSidecarHealth.mockResolvedValue({
+      status: 'reachable',
+      kokoroLoaded: false,
+      kokoroPackageInstalled: true,
+      kokoroWeightsPresent: true,
+    });
+
+    const s = await computeModelsStatus('/repo');
+
+    expect(s.engines.kokoro.state).toBe('ready');
+  });
+
+  it('keeps a reachable legacy external payload unknown without consulting local engine disks', async () => {
+    sidecarVenvPresent.mockReturnValue(false);
+    probeSidecarHealth.mockResolvedValue({ status: 'reachable', engines: ['kokoro', 'qwen'] });
+
+    const s = await computeModelsStatus('/repo');
+
+    /* The mocked web-container disk says Kokoro is fully installed. A legacy
+       external payload has no capability evidence, so that local fact must
+       not resurrect the remote engine or manufacture package-missing. */
+    expect(s.engines.kokoro).toMatchObject({ state: 'not-installed', packageFault: 'ok' });
+    expect(s.engines.kokoro.availabilityKnown).toBe(false);
+    expect(s.engines.qwen).toMatchObject({
+      state: 'not-installed',
+      packageFault: 'ok',
+      availabilityKnown: false,
+    });
+  });
+
+  it('marks explicit modern external false capabilities as confirmed not-installed', async () => {
+    sidecarVenvPresent.mockReturnValue(false);
+    probeSidecarHealth.mockResolvedValue({
+      status: 'reachable',
+      kokoroPackageInstalled: false,
+      kokoroWeightsPresent: false,
+      qwenPackageInstalled: false,
+      qwenWeightsPresent: false,
+      coquiPackageInstalled: false,
+      coquiWeightsPresent: false,
+    });
+
+    const s = await computeModelsStatus('/repo');
+
+    for (const engine of Object.values(s.engines)) {
+      expect(engine).toMatchObject({ state: 'not-installed', availabilityKnown: true });
+    }
+  });
+
+  it('treats package=false as known without weights, but package=true without weights as unknown', async () => {
+    sidecarVenvPresent.mockReturnValue(false);
+    probeSidecarHealth.mockResolvedValue({
+      status: 'reachable',
+      kokoroPackageInstalled: true,
+      qwenPackageInstalled: false,
+      coquiPackageInstalled: false,
+    });
+
+    const s = await computeModelsStatus('/repo');
+
+    expect(s.engines.kokoro.availabilityKnown).toBe(false);
+    expect(s.engines.qwen).toMatchObject({
+      state: 'not-installed',
+      availabilityKnown: true,
+    });
+    expect(s.engines.coqui.availabilityKnown).toBe(true);
+  });
+
+  it('still reports a missing runtime when neither a local venv nor the configured sidecar is available', async () => {
+    sidecarVenvPresent.mockReturnValue(false);
+    probeSidecarHealth.mockResolvedValue({ status: 'unreachable' });
+
+    const s = await computeModelsStatus('/repo');
+
+    expect(probeSidecarHealth).toHaveBeenCalledTimes(1);
+    expect(findPython312).toHaveBeenCalledTimes(1);
+    expect(s.runtime).toEqual({ installedOnDisk: false, pythonFound: false, process: 'starting' });
   });
 });
 

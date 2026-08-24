@@ -8289,6 +8289,15 @@ components:
             Install/Repair buttons (`engineInstallLabel` and the three
             install cards) — name the same fault instead of re-deriving a
             possibly-disagreeing verdict.
+        availabilityKnown:
+          type: boolean
+          description: |
+            Whether a reachable external sidecar supplied enough capability
+            data to determine this engine's availability. A loaded engine or
+            an explicitly absent package is conclusive without a weights
+            field; otherwise legacy partial data remains unknown. The coarse
+            state may remain not-installed for display, but Setup must not
+            treat unknown availability as confirmed absence.
 
     EngineRecommendation:
       type: object

@@ -52,6 +52,11 @@ function diagnosis(
 }
 
 export function diagnoseSidecar(input: SidecarDiagnosisInput): BlockerDiagnosis {
+  /* A responding configured sidecar is the runtime authority. In Docker or a
+     remote-sidecar setup the web process legitimately has no local venv. */
+  if (input.sidecarReachable) {
+    return diagnosis('pass', 'pass', 'Voice engine ready.', '');
+  }
   if (!input.venvPresent) {
     if (!input.pythonFound) {
       return diagnosis(

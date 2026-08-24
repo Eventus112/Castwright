@@ -56,20 +56,50 @@ function gpuDetail(health: Partial<SidecarHealthResult>, bootTotalMb: number | n
 }
 
 export async function computeModelsStatus(repoRoot: string): Promise<ModelsStatus> {
-  const installedOnDisk = sidecarVenvPresent(repoRoot);
-  const pythonFound = installedOnDisk ? true : probePython312Cached();
+  const localVenvPresent = sidecarVenvPresent(repoRoot);
   const supervisor = getActiveSupervisor();
-  const health: Partial<SidecarHealthResult> = installedOnDisk
-    ? await probeSidecarHealth()
-    : { status: 'unreachable' };
+  /* The configured sidecar may run in another container/host. Its health is
+     independent of whether this web process can see a local Python venv. */
+  const health: Partial<SidecarHealthResult> = await probeSidecarHealth();
   const reachable = health.status === 'reachable';
+  /* `installedOnDisk` is the client-facing "runtime available" axis. A
+     reachable configured sidecar owns its own Python environment, so the web
+     container neither needs nor should offer to bootstrap one locally. */
+  const installedOnDisk = localVenvPresent || reachable;
+  const pythonFound = installedOnDisk ? true : probePython312Cached();
 
   const engines = {} as Record<VoiceEngineId, EngineProbeResult>;
   for (const e of VOICE_ENGINES) {
+    const externalRuntime = reachable && !localVenvPresent;
+    const livePackage = externalRuntime ? e.liveSpecPresent(health) : undefined;
+    const liveWeights = externalRuntime
+      ? e.id === 'kokoro'
+        ? health.kokoroWeightsPresent
+        : e.id === 'qwen'
+          ? health.qwenWeightsPresent
+          : e.id === 'coqui'
+            ? health.coquiWeightsPresent
+            : undefined
+      : undefined;
+    const loaded = reachable ? e.liveLoaded(health) : false;
+    /* A confirmed-absent package is a complete availability answer by itself:
+       weights cannot make that engine usable. A present package still needs a
+       weights capability before availability is known. */
+    const externalAvailabilityKnown =
+      loaded || livePackage === false || (livePackage === true && liveWeights !== undefined);
     engines[e.id] = {
-      packageOnDisk: e.packageInstalledOnDisk(repoRoot),
-      weightsOnDisk: e.weightsPresentOnDisk(repoRoot),
-      loaded: reachable ? e.liveLoaded(health) : false,
+      packageOnDisk: loaded
+        ? true
+        : externalRuntime
+          ? externalAvailabilityKnown && livePackage === true
+          : e.packageInstalledOnDisk(repoRoot),
+      weightsOnDisk: loaded
+        ? true
+        : externalRuntime
+          ? externalAvailabilityKnown && liveWeights === true
+          : e.weightsPresentOnDisk(repoRoot),
+      loaded,
+      availabilityKnown: externalRuntime ? externalAvailabilityKnown : true,
       /* #1965 — the real-import result and the find_spec probe are forwarded
          separately; buildModelsStatus decides which one governs. Sidecar down →
          both unknown (undefined), which can never read as broken. */
@@ -80,6 +110,7 @@ export async function computeModelsStatus(repoRoot: string): Promise<ModelsStatu
 
   // GPU string + total from the SINGLE probe (no second buildDiagnostics probe).
   const bootTotalMb = getDeviceTotalVramMb();
+  const totalMb = reachable ? health.vramTotalMb ?? bootTotalMb : bootTotalMb;
 
   return buildModelsStatus({
     runtime: {
@@ -93,7 +124,7 @@ export async function computeModelsStatus(repoRoot: string): Promise<ModelsStatu
       }),
     },
     engines,
-    info: { gpu: gpuDetail(health, bootTotalMb), vramTotalMb: bootTotalMb },
+    info: { gpu: gpuDetail(health, bootTotalMb), vramTotalMb: totalMb },
   });
 }
 

@@ -127,19 +127,29 @@ setupReadinessRouter.get('/readiness', async (_req: Request, res: Response) => {
   });
 
   const VOICE_ENGINE_IDS = ['kokoro', 'qwen', 'coqui'] as const;
-  const noEngineAtAll = VOICE_ENGINE_IDS.every((id) => models.engines[id].state === 'not-installed');
+  const availabilityUnknown = VOICE_ENGINE_IDS.some(
+    (id) => models.engines[id].availabilityKnown === false,
+  );
+  const noEngineAtAll =
+    !availabilityUnknown &&
+    VOICE_ENGINE_IDS.every((id) => models.engines[id].state === 'not-installed');
   const anyEngineUsable = VOICE_ENGINE_IDS.some((id) => engineUsable(models.engines[id]));
-  const weightsMissingEngine =
-    models.engines.kokoro.state === 'weights-missing' ? 'kokoro' :
-    models.engines.qwen.state === 'weights-missing' ? 'qwen' :
-    models.engines.coqui.state === 'weights-missing' ? 'coqui' : null;
+  const weightsMissingEngine = availabilityUnknown
+    ? null
+    : models.engines.kokoro.state === 'weights-missing'
+      ? 'kokoro'
+      : models.engines.qwen.state === 'weights-missing'
+        ? 'qwen'
+        : models.engines.coqui.state === 'weights-missing'
+          ? 'coqui'
+          : null;
 
   const tts = diagnoseTts(sidecar, {
     noEngineAtAll,
     anyEngineUsable,
     weightsMissingEngine,
-    kokoroPackageFault: models.engines.kokoro.packageFault,
-    qwenPackageFault: models.engines.qwen.packageFault,
+    kokoroPackageFault: availabilityUnknown ? 'ok' : models.engines.kokoro.packageFault,
+    qwenPackageFault: availabilityUnknown ? 'ok' : models.engines.qwen.packageFault,
   });
 
   const {

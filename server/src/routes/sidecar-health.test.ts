@@ -292,7 +292,7 @@ describe('GET /api/sidecar/health', () => {
        the kokoro/coqui/whisper siblings (see the qwenPackageInstalled
        (#2533) describe block below for the regression this pins). */
     expect(absent.body.qwenPackageInstalled).toBeUndefined();
-    expect(absent.body.qwenWeightsPresent).toBe(false);
+    expect(absent.body.qwenWeightsPresent).toBeUndefined();
 
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ ok: true, qwen_install_state: 'bogus' }), {
@@ -302,6 +302,21 @@ describe('GET /api/sidecar/health', () => {
     );
     const garbage = await request(makeApp()).get('/api/sidecar/health');
     expect(garbage.body.qwenInstallState).toBe('not-installed');
+    expect(garbage.body.qwenWeightsPresent).toBeUndefined();
+  });
+
+  it('infers missing qwen capability booleans from a valid legacy install-state', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, qwen_install_state: 'ready' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const res = await request(makeApp()).get('/api/sidecar/health');
+
+    expect(res.body.qwenPackageInstalled).toBe(true);
+    expect(res.body.qwenWeightsPresent).toBe(true);
   });
 
   it('reports qwenInstallState="loaded" when qwen_loaded is true even if qwen_install_state is ABSENT', async () => {
@@ -504,6 +519,33 @@ describe('GET /api/sidecar/health', () => {
       expect(res.body.coquiPackageInstalled).toBe(true);
       expect(res.body.kokoroPackageInstalled).toBe(true);
       expect(res.body.whisperPackageInstalled).toBe(true);
+    });
+
+    it('forwards the external sidecar coqui weights capability', async () => {
+      fetchMock.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            engines: ['coqui'],
+            coqui_package_installed: true,
+            coqui_weights_present: true,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      const res = await request(makeApp()).get('/api/sidecar/health');
+      expect(res.body.coquiWeightsPresent).toBe(true);
+    });
+
+    it('forwards the external sidecar kokoro weights capability', async () => {
+      fetchMock.mockResolvedValue(
+        new Response(
+          JSON.stringify({ ok: true, kokoro_loaded: false, kokoro_weights_present: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      const res = await request(makeApp()).get('/api/sidecar/health');
+      expect(res.body.kokoroWeightsPresent).toBe(true);
     });
   });
 

@@ -6107,6 +6107,13 @@ export interface components {
              * @enum {string}
              */
             packageFault: "ok" | "missing" | "broken";
+            /**
+             * @description False when a reachable legacy external sidecar did not report a
+             *     complete package-and-weights capability pair for this engine.
+             *     The coarse state may remain not-installed for display, but Setup
+             *     must not treat that as confirmed absence.
+             */
+            availabilityKnown?: boolean;
         };
         EngineRecommendation: {
             /** @enum {string} */

@@ -60,8 +60,13 @@ function makeApp() {
 
 type EngineState = 'not-installed' | 'package-missing' | 'weights-missing' | 'ready' | 'loaded';
 
-function engineStatus(state: EngineState, packageBroken = false, packageFault: PackageFault = 'ok') {
-  return { state, packageBroken, packageFault };
+function engineStatus(
+  state: EngineState,
+  packageBroken = false,
+  packageFault: PackageFault = 'ok',
+  availabilityKnown = true,
+) {
+  return { state, packageBroken, packageFault, availabilityKnown };
 }
 
 /* Builds a controlled computeModelsStatus() return value. Defaults to an
@@ -119,6 +124,67 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
     expect(res.body.blockers.sidecar.cause).toBe('pass');
     expect(res.body.blockers.tts.cause).toBe('pass');
     expect(res.body.info.vramTotalMb).toBe(8192);
+  });
+
+  it('treats a reachable external sidecar as ready without a local web-container venv', async () => {
+    computeModelsStatus.mockResolvedValue(modelsStatus({
+      runtime: { installedOnDisk: false, pythonFound: false, process: 'ready' },
+      engines: {
+        kokoro: engineStatus('not-installed'),
+        qwen: engineStatus('ready'),
+        coqui: engineStatus('not-installed'),
+      },
+    }));
+    venvCorePackageInstalled.mockReturnValue(false);
+    getActiveSupervisor.mockReturnValue(null);
+
+    const res = await request(makeApp()).get('/api/setup/readiness');
+
+    expect(res.status).toBe(200);
+    expect(res.body.blockers.sidecar).toMatchObject({ status: 'pass', cause: 'pass' });
+    expect(res.body.blockers.tts).toMatchObject({ status: 'pass', cause: 'pass' });
+    expect(res.body.ready).toBe(true);
+  });
+
+  it('does not block Setup when a reachable external legacy sidecar has unknown engine capabilities', async () => {
+    computeModelsStatus.mockResolvedValue(modelsStatus({
+      runtime: { installedOnDisk: true, pythonFound: true, process: 'ready' },
+      engines: {
+        kokoro: engineStatus('not-installed', false, 'ok', false),
+        qwen: engineStatus('not-installed', false, 'ok', false),
+        coqui: engineStatus('not-installed', false, 'ok', false),
+      },
+    }));
+    getActiveSupervisor.mockReturnValue(null);
+
+    const res = await request(makeApp()).get('/api/setup/readiness');
+
+    expect(res.body.blockers.sidecar).toMatchObject({ status: 'pass', cause: 'pass' });
+    expect(res.body.blockers.tts.cause).not.toBe('no-engine-installed');
+    expect(res.body.blockers.tts.status).toBe('pass');
+    expect(res.body.ready).toBe(true);
+  });
+
+  it('fails open all TTS availability faults for mixed legacy capabilities', async () => {
+    /* Producer shape: cold external Kokoro reports package=true but omits
+       weights (unknown), while modern Qwen/Coqui explicitly report absent.
+       Qwen's live package=false also classifies packageFault as missing; that
+       sibling fault and a confirmed Coqui weights fault must not block while
+       any engine availability is unknown. */
+    computeModelsStatus.mockResolvedValue(modelsStatus({
+      runtime: { installedOnDisk: true, pythonFound: true, process: 'ready' },
+      engines: {
+        kokoro: engineStatus('not-installed', false, 'ok', false),
+        qwen: engineStatus('not-installed', false, 'missing', true),
+        coqui: engineStatus('weights-missing', false, 'ok', true),
+      },
+    }));
+
+    const res = await request(makeApp()).get('/api/setup/readiness');
+
+    expect(res.body.blockers.sidecar.status).toBe('pass');
+    expect(res.body.blockers.tts).toMatchObject({ status: 'pass', cause: 'pass' });
+    expect(res.body.ready).toBe(true);
   });
 
   /* ops-35 (#1877) invariant 4 — THE load-bearing promise of the ffmpeg floor:
@@ -302,6 +368,7 @@ describe('GET /api/setup/readiness — orchestration wiring', () => {
 
     expect(res.body.blockers.tts.status).toBe('fail');
     expect(res.body.blockers.tts.cause).toBe('no-engine-installed');
+    expect(res.body.ready).toBe(false);
   });
 
   it('surfaces info.gpu and info.vramTotalMb straight from computeModelsStatus', async () => {
