@@ -348,7 +348,17 @@ export function pickVoiceForEngine(
       qwenSlot?.name ??
       (voice.overrideTtsVoice?.engine === 'qwen' ? voice.overrideTtsVoice.name : undefined);
     if (!designedName) return '';
-    return qwenStorageKey(voice, voice.id);
+    const key = qwenStorageKey(voice, voice.id);
+    /* srv-43 regression (2026-09-07) — a REUSED character can carry the qwen
+       slot WITHOUT its voiceUuid (reuse-link / cast-override paths that copy
+       overrideTtsVoices but not the identity). qwenStorageKey then falls back
+       to the SLUG key `qwen-<voiceId ?? id>` (e.g. qwen-circus-owner) whose
+       `.pt` never exists on disk — the real embedding lives under the slot's
+       OWN name (qwen-<uuid>), which is itself the storage key written at
+       design time. A character with a voiceUuid is unaffected (key wins), and
+       a pre-srv-43 legacy slot with a human-label name resolves exactly as
+       before (its slug key IS the on-disk key). */
+    return voice.voiceUuid || !designedName.startsWith('qwen-') ? key : designedName;
   }
 
   /* fs-38 Wave 3c Task 16 [ADV-H3] — a clone-capable engine's slot carrying

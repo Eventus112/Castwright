@@ -175,6 +175,42 @@ describe('book-state router — manuscript slice validation (#1356 mock-fixture-
     expect(parsed.sentences[0].text).toBe('A real sentence.');
   });
 
+  it('PUT slice=manuscript prunes legacy empty-string sentences without rejecting valid edits', async () => {
+    const res = await request(app)
+      .put(`/api/books/${bookId}/state`)
+      .set('Content-Type', 'application/json')
+      .send({
+        slice: 'manuscript',
+        patch: {
+          sentences: [
+            validSentence,
+            { ...validSentence, id: 2, text: '' },
+            { ...validSentence, id: 3, text: 'Newly split text.' },
+          ],
+        },
+      });
+    expect(res.status).toBe(204);
+
+    const onDisk = join(bookDir, '.audiobook', 'manuscript-edits.json');
+    const parsed = JSON.parse(readFileSync(onDisk, 'utf8'));
+    expect(parsed.sentences.map((sentence: { id: number }) => sentence.id)).toEqual([1, 3]);
+    /* This suite intentionally shares the seeded edits file between cases;
+       restore its one-row baseline for the wipe-guard test below. */
+    writeFileSync(onDisk, JSON.stringify({ sentences: [validSentence] }));
+  });
+
+  it('PUT slice=manuscript still rejects non-string sentence text', async () => {
+    const res = await request(app)
+      .put(`/api/books/${bookId}/state`)
+      .set('Content-Type', 'application/json')
+      .send({
+        slice: 'manuscript',
+        patch: { sentences: [{ ...validSentence, text: null }] },
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Malformed manuscript patch/);
+  });
+
   it('PUT slice=manuscript 409s on a patch that would wipe an already-analysed manuscript to zero sentences', async () => {
     /* Depends on the previous case having seeded manuscript-edits.json with a
        non-empty sentence list — mirrors the live-book scenario from #1356: a

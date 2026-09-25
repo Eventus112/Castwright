@@ -285,6 +285,37 @@ describe('hydrateCharacterVoice', () => {
     expect(out.voiceStyle).toBe('sardonic charmer');
   });
 
+  /* srv-43 regression (2026-09-07) — the resolver already returns
+     `resolved.voiceUuid`, but the merge step used to drop it. A reused
+     character then kept its `overrideTtsVoices.qwen` slot while losing the
+     identity, so `qwenStorageKey` fell back to the slug key (qwen-<voiceId>)
+     and every downstream lookup (manifest read, synth, mint-variant) missed. */
+  it('inherits the source voiceUuid onto a reused char (srv-43 regression)', async () => {
+    const reused: ReuseHydratable = {
+      id: 'unknown-male',
+      voiceId: 'circus-owner', // slug identity carried across books
+      matchedFrom: { bookId: 'src', characterId: 'circus-owner' },
+    };
+    const source: ReuseHydratable = {
+      ...designed('circus-owner', 'qwen-3Zcek_BgRFGdee9MvFs0G'),
+      voiceUuid: '3Zcek_BgRFGdee9MvFs0G',
+    };
+    const out = await hydrateCharacterVoice(reused, loaderFrom({ src: [source] }));
+    expect(out.voiceUuid).toBe('3Zcek_BgRFGdee9MvFs0G');
+    expect(out.overrideTtsVoices?.qwen?.name).toBe('qwen-3Zcek_BgRFGdee9MvFs0G');
+  });
+
+  it('keeps the character own voiceUuid, never clobbering it with the source (srv-43)', async () => {
+    const reused: ReuseHydratable = {
+      id: 'x',
+      voiceUuid: 'OWN-uuid',
+      matchedFrom: { bookId: 'src', characterId: 'x' },
+    };
+    const source: ReuseHydratable = { ...designed('x', 'qwen-x'), voiceUuid: 'SRC-uuid' };
+    const out = await hydrateCharacterVoice(reused, loaderFrom({ src: [source] }));
+    expect(out.voiceUuid).toBe('OWN-uuid');
+  });
+
   it('keeps the character own persona, never clobbering it with the source (srv-18)', async () => {
     const reused: ReuseHydratable = {
       id: 'x',

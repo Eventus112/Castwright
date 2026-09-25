@@ -138,6 +138,52 @@ describe('clearMismatchedDesignedVoices', () => {
     ]);
   });
 
+  /* srv-43 regression (2026-09-07) — a REUSED character lost its voiceUuid
+     (reuse-link copied overrideTtsVoices but not the identity), so
+     qwenStorageKey(char, char.id) fell back to the SLUG key (qwen-<voiceId>)
+     whose manifest never exists — the loop cleared a perfectly valid,
+     matching-language voice as "undesigned". The slot NAME is itself the
+     storage key (qwen-<uuid>), and the manifest lives there. */
+  it('keeps a reused voice whose voiceUuid was stripped but whose slot name is the storage key (srv-43 regression)', async () => {
+    /* Manifest on disk is keyed by the uuid — the slot name — NOT by the slug. */
+    writeManifest('qwen-3Zcek_BgRFGdee9MvFs0G', 'Russian');
+    const cast: CastCharacter[] = [
+      {
+        id: 'unknown-male',
+        name: 'unknown-male',
+        ttsEngine: 'qwen',
+        voiceId: 'circus-owner', // slug identity, no voiceUuid
+        overrideTtsVoices: { qwen: { name: 'qwen-3Zcek_BgRFGdee9MvFs0G' } },
+      },
+    ];
+
+    await clearMismatchedDesignedVoices(cast, 'Russian', 'ru');
+
+    expect(cast[0].overrideTtsVoices?.qwen?.name).toBe('qwen-3Zcek_BgRFGdee9MvFs0G');
+  });
+
+  it('still clears a slug-stripped reused voice when even its slot-name manifest language mismatches (srv-43)', async () => {
+    /* The same data-loss case, but the voice was genuinely designed in
+       English — the lookup by slot name must now FIND the manifest so the
+       mismatch is detected and the voice cleared (fail loud, not silently
+       "missing"). */
+    writeManifest('qwen-3Zcek_BgRFGdee9MvFs0G', 'English');
+    const cast: CastCharacter[] = [
+      {
+        id: 'unknown-male',
+        name: 'unknown-male',
+        ttsEngine: 'qwen',
+        voiceId: 'circus-owner',
+        overrideTtsVoices: { qwen: { name: 'qwen-3Zcek_BgRFGdee9MvFs0G' } },
+      },
+    ];
+
+    const cleared = await clearMismatchedDesignedVoices(cast, 'Russian', 'ru');
+
+    expect(cast[0].overrideTtsVoices?.qwen).toBeUndefined();
+    expect(cleared[0].designedLanguage).toBe('English');
+  });
+
   /* fs-38 Wave 3c [ADV-C1] — a CLONED voice's language is the speaker's own,
      not a baked design language, and its manifest lives under
      qwen-<libraryUuid>, which qwenStorageKey() never produces (it has no

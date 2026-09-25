@@ -55,9 +55,32 @@ export async function clearMismatchedDesignedVoices(
     if (hasClonedProvenance(c, 'qwen')) continue;
     const designedName = c.overrideTtsVoices?.qwen?.name;
     if (!designedName) continue;
-    const manifest = await readJson<{ language?: string }>(
-      qwenVoiceSidecarPath(qwenStorageKey(c, c.id)),
+    /* srv-43 regression (2026-09-07) — the slot `name` written at design time
+       IS the storage key (qwen-<uuid> / qwen-<uuid>__emotion / legacy
+       qwen-<charId>), so it is the authoritative manifest path.
+       `qwenStorageKey(c, c.id)` falls back to `qwen-<voiceId ?? id>` when
+       `voiceUuid` is missing — for a REUSED character whose identity was
+       stripped (reuse-link paths that copy overrideTtsVoices but not
+       voiceUuid) that yields a slug key (`qwen-circus-owner`) whose manifest
+       does not exist, so the loop cleared the voice as "undesigned". Look up
+       by the slot name first; keep qwenStorageKey as the secondary attempt
+       (legacy human-label names) and as the primary when the name is not a
+       storage key. Worst case = the pre-patch single-lookup behaviour. */
+    const primaryKey = designedName.startsWith('qwen-')
+      ? designedName
+      : qwenStorageKey(c, c.id);
+    const secondaryKey =
+      primaryKey === qwenStorageKey(c, c.id)
+        ? null
+        : qwenStorageKey(c, c.id);
+    let manifest = await readJson<{ language?: string }>(
+      qwenVoiceSidecarPath(primaryKey),
     ).catch(() => null);
+    if (!manifest && secondaryKey) {
+      manifest = await readJson<{ language?: string }>(
+        qwenVoiceSidecarPath(secondaryKey),
+      ).catch(() => null);
+    }
     if (!manifest || manifest.language !== expectedLang) {
       if (c.overrideTtsVoices?.qwen) delete c.overrideTtsVoices.qwen;
       console.warn(

@@ -584,6 +584,30 @@ describe('srv-43 qwen storage key', () => {
     expect(pickVoiceForEngine('qwen', voice)).toBe('qwen-wren');
   });
 
+  /* srv-43 regression (2026-09-07) — a REUSED character carries the qwen slot
+     WITHOUT its voiceUuid (reuse-link / cast-override paths copy the slot but
+     not the identity). qwenStorageKey then produced the SLUG key
+     (qwen-circus-owner) whose .pt never exists; the real embedding lives under
+     the slot's own name (qwen-<uuid>). Resolve the slot name instead. */
+  it('resolves a slug-identity reused voice to its slot storage key when voiceUuid is missing (srv-43 regression)', () => {
+    const voice = {
+      id: 'unknown-male',
+      voiceId: 'circus-owner',
+      overrideTtsVoices: { qwen: { name: 'qwen-3Zcek_BgRFGdee9MvFs0G' } },
+    };
+    expect(pickVoiceForEngine('qwen', voice)).toBe('qwen-3Zcek_BgRFGdee9MvFs0G');
+  });
+
+  it('still prefers the uuid-derived key when voiceUuid IS present (srv-43 unchanged)', () => {
+    const voice = {
+      id: 'unknown-male',
+      voiceUuid: '3Zcek_BgRFGdee9MvFs0G',
+      voiceId: 'circus-owner',
+      overrideTtsVoices: { qwen: { name: 'qwen-3Zcek_BgRFGdee9MvFs0G' } },
+    };
+    expect(pickVoiceForEngine('qwen', voice)).toBe('qwen-3Zcek_BgRFGdee9MvFs0G');
+  });
+
   it('returns empty string for an undesigned qwen character', () => {
     expect(pickVoiceForEngine('qwen', { id: 'wren' })).toBe('');
   });

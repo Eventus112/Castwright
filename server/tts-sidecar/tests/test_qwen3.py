@@ -993,6 +993,7 @@ def test_synthesize_reuses_cached_voice(fake_qwen_runtime) -> None:
     import torch as _t  # the stubbed module from the fixture
 
     assert _t._last_load_kwargs.get("weights_only") is False
+    assert _t._last_load_kwargs.get("map_location") == engine._base.device
 
 
 def test_synthesize_fails_fast_on_undesigned_voice(fake_qwen_runtime) -> None:
@@ -2337,6 +2338,23 @@ def test_synth_17b_derive_writes_pt_atomically(fake_qwen_runtime, monkeypatch) -
         if f.startswith("priya__1.7b.pt.") and f.endswith(".tmp")
     ]
     assert leftovers == [], f"atomic write left a temp file behind: {leftovers}"
+
+
+def test_synth_17b_disk_prompt_loads_on_resident_device(fake_qwen_runtime) -> None:
+    """CUDA-authored prompt caches must be remapped for CPU-only synthesis."""
+    eng = fake_qwen_runtime["engine"]
+    vdir = str(fake_qwen_runtime["dir"])
+    eng.design_voice("cpu-narrator", "A steady narrator.", "English", None)
+    _seed_stale_17b_disk_cache(eng, vdir, "cpu-narrator")
+    eng._prompt_cache.pop("cpu-narrator__1.7b", None)
+    eng._base17 = type(eng._base)("1.7b")
+
+    eng.synthesize("1.7b", "cpu-narrator", "A short line.")
+
+    import torch as _t
+
+    assert _t._last_load_kwargs.get("weights_only") is False
+    assert _t._last_load_kwargs.get("map_location") == eng._base17.device
 
 
 def test_synth_17b_reraises_and_cleans_up_tmp_file_on_save_failure(

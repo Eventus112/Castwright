@@ -46,6 +46,9 @@ type OverrideMap = Partial<Record<TtsEngine, OverrideSlot>>;
 export interface ReuseHydratable {
   id: string;
   ttsEngine?: TtsEngine | null;
+  /** srv-43 — the deterministic cross-book write key (voiceId ?? id) carried
+      on reuse rows; qwenStorageKey's legacy fallback keys off it. */
+  voiceId?: string;
   /** srv-43 — immutable per-voice identity (nanoid) minted at design time. */
   voiceUuid?: string;
   overrideTtsVoices?: OverrideMap | null;
@@ -201,7 +204,7 @@ export async function resolveReusedVoiceFields(
 export async function hydrateCharacterVoice<T extends ReuseHydratable>(
   character: T,
   load: CastLoader,
-): Promise<T & Pick<ReuseHydratable, 'ttsEngine' | 'overrideTtsVoices' | 'voiceStyle'>> {
+): Promise<T & Pick<ReuseHydratable, 'ttsEngine' | 'overrideTtsVoices' | 'voiceStyle' | 'voiceUuid'>> {
   const resolved = await resolveReusedVoiceFields(character, load);
   if (!resolved) return character;
 
@@ -224,5 +227,14 @@ export async function hydrateCharacterVoice<T extends ReuseHydratable>(
     ttsEngine: character.ttsEngine ?? resolved.ttsEngine ?? null,
     overrideTtsVoices: mergedOverrides,
     voiceStyle: character.voiceStyle ?? resolved.voiceStyle,
+    /* srv-43 regression (2026-09-07) — inherit the source's immutable voice
+       identity. The resolver resolves `resolved.voiceUuid` but the old merge
+       dropped it, so a reused character kept `overrideTtsVoices.qwen` yet lost
+       `voiceUuid`. `qwenStorageKey` then fell back to `qwen-<voiceId ?? id>`
+       (a slug like `qwen-circus-owner`), the manifest/`.pt` live under
+       `qwen-<uuid>`, and verify-designed-voice-language + synth reported the
+       voice as "not designed" (409 on mint-variant, clear-on-generate).
+       Fill-the-gap only (character's own wins) — matches the sibling fields. */
+    voiceUuid: character.voiceUuid ?? resolved.voiceUuid,
   };
 }

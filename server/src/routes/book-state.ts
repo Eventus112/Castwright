@@ -711,7 +711,29 @@ bookStateRouter.put('/:bookId/state', async (req: Request, res: Response) => {
         break;
       }
       case 'manuscript': {
-        const parsed = manuscriptPatchSchema.safeParse(body.patch);
+        /* Older analysis/edit files can contain empty placeholder sentences.
+           The generation path already drops them, but manuscript autosave
+           sends the entire sentence array back; validating that legacy array
+           verbatim makes every otherwise-valid edit fail with a 400. Remove
+           only exact empty-string placeholders before validation. Other bad
+           shapes (missing/non-string text, malformed rows) still fail loud. */
+        const manuscriptPatch =
+          body.patch != null &&
+          typeof body.patch === 'object' &&
+          Array.isArray((body.patch as { sentences?: unknown }).sentences)
+            ? {
+                ...(body.patch as Record<string, unknown>),
+                sentences: ((body.patch as { sentences: unknown[] }).sentences).filter(
+                  (sentence) =>
+                    !(
+                      sentence != null &&
+                      typeof sentence === 'object' &&
+                      (sentence as { text?: unknown }).text === ''
+                    ),
+                ),
+              }
+            : body.patch;
+        const parsed = manuscriptPatchSchema.safeParse(manuscriptPatch);
         if (!parsed.success) {
           return res.status(400).json({ error: `Malformed manuscript patch: ${parsed.error.message}` });
         }

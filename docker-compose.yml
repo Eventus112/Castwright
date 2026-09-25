@@ -5,7 +5,7 @@
 #   Restart:              docker compose restart
 #   Logs:                 docker compose logs -f
 #   Stop:                 docker compose down
-#
+# docker compose -f /home/bzbz/model_project/Castwright/docker-compose.yml up -d --force-recreate
 # /workspace and the analysis cache persist on the host under
 # ./castwright-workspace. Deleting that host directory deletes books,
 # settings, and cached analysis data.
@@ -55,12 +55,23 @@ services:
       # 0.6B-tier per-batch token budget: back to the shipped default 3600
       # (was 4800 — too wide for this card once the 1.7B tier entered the mix).
      # QWEN_BATCH_TOKEN_BUDGET: "3600"
-      # Optional 1.7B Quality-tier small-card overrides, read by this web
-      # server's packer rather than the sidecar. Currently disabled: the
-      # shipped defaults (width 32 / token budget 3600) apply. Uncomment only
-      # if those defaults cause CUDA OOM on this GPU.
-      #QWEN_BATCH_SIZE_17B: "8"
-      #QWEN_BATCH_TOKEN_BUDGET_17B: "1200"
+      # 1.7B Quality-tier batch caps (read by this web server's packer,
+      # not the sidecar). 30.08: 4/1000 was the incident-tune for the
+      # 4700-char mega-unit stall; that case is covered by the 30-min
+      # per-call ceiling now, so back to 8/1600: ~10-15x more audio per
+      # forward, measured POOL peak ~10.3 GB (soft-recycle tripped) -> 1200 keeps target peak ~8-9 GB under the 10 GB
+      # soft-recycle line. Mega-units (analyzer-merged, 4-5k chars)
+      # form a solo batch regardless of caps.
+      QWEN_BATCH_SIZE_17B: "2"
+      QWEN_BATCH_TOKEN_BUDGET_17B: "1200"
+      # 30.08.2026: mega-units in «Повелитель тайн» (analyzer merges paragraphs,
+      # 4-5k chars per "sentence") decode ~14 min on 1.7B (RTF ~1.28) and tripped
+      # the 600s per-call ceiling -> synthetic timeout -> retry storm ->
+      # RecycleStormError (not a VRAM/RAM fault). Raise per-call ceiling to 30 min.
+      SIDECAR_CALL_TIMEOUT_MS: "1800000"
+      # No-progress watchdog must sit ABOVE the per-call ceiling, else it aborts
+      # a legitimately slow single-unit batch first. 36 min.
+      CHAPTER_NO_PROGRESS_MS: "2160000"
       # Persona generation engine (voice-style personas for Qwen voice design):
       # pin LOCAL Ollama instead of the gemini default. The UI override
       # (analyzer.personaGeneration.engine) resolves env > override > default,
@@ -106,24 +117,39 @@ services:
     environment:
       LOCAL_TTS_HOST: "0.0.0.0"
       SIDECAR_VENV_DIR: /opt/venv
-      # Load the Qwen 0.6B-Base at boot instead of on first synth, so the
-      # ~30-60 s cold start (weight read + CUDA init) is paid once at
-      # container start, not on the first sentence of a chapter.
-      PRELOAD_QWEN: "1"
-      # side-25: run the Code2Wav codec decode on the model's own device
-      # (cuda here) instead of CPU. With the codec on CPU the GPU idles
-      # between token generation and waveform decode — the main reason
-      # sustained GPU utilisation looked near zero during generation.
-      QWEN_CODEC_DEVICE: auto
+      # Qwen and the auxiliary voice engines render on the GPU. Generation is
+      # serial (generationWorkers=1 in user-settings.json).
+      QWEN_DEVICE: cuda
+      KOKORO_DEVICE: cuda
+      COQUI_DEVICE: cuda
+      SPK_DEVICE: cuda
+      # Do NOT preload the 0.6B-Base: this box renders exclusively at the
+      # 1.7B Quality tier (every cast member pinned to qwen3-tts-1.7b).
+      # A preloaded 0.6B co-resides ~2.2 GB in VRAM next to the 1.7B render
+      # and pushed wide batches past the sidecar's 11.2 GB soft-recycle line
+      # (2026-08-25 OOM / CUDA-context-corruption storm). With "0" it stays
+      # out of VRAM entirely. Set back to "1" only if you resume 0.6B
+      # rendering (the first synth then pays a one-time ~30-60 s cold load).
+      PRELOAD_QWEN: "0"
+      # 30.08: VRAM soft-recycle line at 10 GB (default = 0.90 x card
+      # ~ 11.3 GB). Reserved-VRAM crossing 10 GB -> sidecar sets
+      # recycle_pending in /health -> web recycles the sidecar cleanly
+      # at the NEXT chapter boundary (fresh CUDA context; kills
+      # fragmentation/leak accumulation before the hard 98% self-exit).
+      # Protects against cumulative VRAM growth across chapters; it
+      # cannot save a single batch that physically needs > 10 GB.
+      #SIDECAR_VRAM_RECYCLE_SOFT_MB: "10000"
+      # Decode Code2Wav on the GPU alongside the acoustic model.
+      QWEN_CODEC_DEVICE: cuda
       # One-time torch.compile of the codec decoder (extra load-time cost,
       # faster steady-state decode). Left OFF until validated on this box.
-      # QWEN_COMPILE_CODEC: "1"
-      # Move the per-sentence QA transcription (faster-whisper base, int8,
-      # ~150-400 MB VRAM) from CPU to GPU. Default is CPU-first so the QA
-      # pass costs zero VRAM; here the card has headroom and the CPU pass
-      # left the GPU idle between synth batches. Gated by the server's
-      # weighted VRAM semaphore; idle-evicted after 120 s (ASR_IDLE_TTL).
-      ASR_DEVICE: cuda
+      #QWEN_COMPILE_CODEC: "1"
+      # Keep per-sentence QA transcription off the synth GPU. A 6431-char
+      # Qwen segment left the 1.7B model resident, then faster-whisper failed
+      # to initialise on the same RTX 3060 with CUDA OOM; the server retried
+      # that failure as a misleading "sidecar recycled" storm. CPU avoids the
+      # cross-model VRAM collision (idle-evicted after ASR_IDLE_TTL).
+      ASR_DEVICE: cpu
       # Designed-voice embedding cache MUST live in the SHARED workspace tree
       # (the same <workspace>/voices/qwen the web container's guard and
       # promote/discard routes read/write — paths.ts qwenVoicesDir()). Without

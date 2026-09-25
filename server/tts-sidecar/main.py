@@ -6802,7 +6802,17 @@ class QwenEngine(Engine):
         # (not a plain tensor), which PyTorch 2.6+'s default safe-unpickler
         # rejects. Safe here — WE wrote this file in design_voice (trusted),
         # it's not untrusted input.
-        prompt = torch.load(pt_path, weights_only=False)
+        # Voice prompts are commonly designed while Qwen is on CUDA, so their
+        # pickle records CUDA storage locations.  Remap to the device this
+        # engine will actually use; otherwise a later CPU-only run fails before
+        # synthesis with "Attempting to deserialize object on a CUDA device".
+        # Prefer the resident wrapper's device when available because an
+        # admitted multi-GPU load may differ from the shared preference.
+        self._ensure_device_resolved()
+        prompt_device = getattr(self._base, "device", self._device)
+        prompt = torch.load(
+            pt_path, map_location=prompt_device, weights_only=False
+        )
         with self._cache_lock:
             self._prompt_cache[voice] = (prompt, lang)
         return prompt, lang, False
@@ -6835,6 +6845,17 @@ class QwenEngine(Engine):
 
         pt_path, _json_path = self._voice_paths(cache_key)
 
+        # Capture the resident wrapper before reading its prompt.  Besides
+        # enforcing this method's documented residency contract for disk hits,
+        # its concrete device lets torch remap a CUDA-authored prompt onto CPU
+        # (or onto the correct card in a multi-GPU run).
+        base17 = self._base17
+        if base17 is None:
+            raise RuntimeError(
+                "Qwen 1.7B-Base model was unloaded before this render "
+                "could load the voice prompt — reload it and retry."
+            )
+
         # A prior process may already have derived and persisted this voice's
         # 1.7B-native prompt (e.g. before a sidecar restart wiped the
         # in-memory cache) — load it instead of re-deriving, which is an
@@ -6849,7 +6870,9 @@ class QwenEngine(Engine):
         # is only needed below, on the actual re-derivation path.
         if os.path.isfile(pt_path):
             try:
-                prompt = torch.load(pt_path, weights_only=False)
+                prompt = torch.load(
+                    pt_path, map_location=base17.device, weights_only=False
+                )
             except FileNotFoundError:
                 # Evicted (redesign / mint-variant / /qwen/evict-voice, all of
                 # which call _evict_17b_prompt) between the isfile check above
@@ -6877,15 +6900,6 @@ class QwenEngine(Engine):
         # `_base17` first. Without this guard the derefs below raised a bare
         # "'NoneType' object has no attribute 'device'" instead of the same
         # typed, actionable `RuntimeError` #1975 established elsewhere.
-        base17 = self._base17
-        if base17 is None:
-            # Generic "render", not "batch render": this method is shared by
-            # synthesize()'s single-utterance 1.7B path AND
-            # synthesize_batch()'s 1.7B loop.
-            raise RuntimeError(
-                "Qwen 1.7B-Base model was unloaded before this render "
-                "could derive the voice prompt — reload it and retry."
-            )
         # Decode ref_code through the 1.7B speech_tokenizer to get a waveform,
         # then re-derive a 1.7B-native clone prompt (mirrors mint_variant ~1831-1836).
         # Move onto the resident 1.7B's OWN card (read off the wrapper, immune to
