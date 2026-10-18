@@ -14,6 +14,7 @@ import {
   softenDashes,
   stripUnsafeForTts,
   stripAudioTags,
+  collapseLetterRepeats,
   normaliseForTts,
 } from './text-normalize.js';
 
@@ -195,6 +196,40 @@ describe('stripUnsafeForTts', () => {
   });
 });
 
+describe('collapseLetterRepeats', () => {
+  /* Live regression (audiobook, 2026-10-18): snoring "ЗЗЗЗЗЗ" and stretched
+     "иииии" ride along in the manuscript text and the 1.7B Qwen sidecar
+     voices them letter-by-letter — a garble storm inside the chapter. The
+     spelled form makes the decoder render a drawn-out sound instead. */
+
+  it('collapses a Cyrillic held-vowel run into a spelled form', () => {
+    expect(collapseLetterRepeats('ЗЗЗЗЗЗ, храпел он.')).toBe('З-з-з, храпел он.');
+    expect(collapseLetterRepeats('ииииииии он тянул')).toBe('и-и-и он тянул');
+  });
+
+  it('collapses Latin snore/hiss runs case-insensitively', () => {
+    expect(collapseLetterRepeats('zzzzzzzzzz he slept')).toBe('z-z-z he slept');
+    expect(collapseLetterRepeats('Ссссссс! Тише!')).toBe('С-с-с! Тише!');
+  });
+
+  it('leaves runs of 4 letters and below alone', () => {
+    /* 4 and shorter is ordinary emphatic spelling — the model renders it. */
+    expect(collapseLetterRepeats('иии он сказал')).toBe('иии он сказал');
+    expect(collapseLetterRepeats('Aaaa и ОООО тут ничего')).toBe('Aaaa и ОООО тут ничего');
+  });
+
+  it('does not touch digits, punctuation, or word interiors with no repeat', () => {
+    expect(collapseLetterRepeats('1111!!! и привет')).toBe('1111!!! и привет');
+    expect(collapseLetterRepeats('bookkeeper')).toBe('bookkeeper');
+  });
+
+  it('is idempotent — the spelled form has no run to re-collapse', () => {
+    const once = collapseLetterRepeats('ZZZZZZZZZZ');
+    expect(once).toBe('Z-z-z');
+    expect(collapseLetterRepeats(once)).toBe(once);
+  });
+});
+
 describe('normaliseForTts (composed)', () => {
   it('cleans the chapter-2 opener (the real regression case)', () => {
     /* This is the literal text that produced ~60s of garbled audio at the
@@ -296,5 +331,16 @@ describe('normaliseForTts (composed)', () => {
   it('no-op on plain prose with langCode (nothing to expand)', () => {
     const plain = 'The quiet road wound north.';
     expect(normaliseForTts(plain, 'en')).toBe(normaliseForTts(plain));
+  });
+
+  it('composed pipeline collapses held-letter runs at the wire boundary', () => {
+    /* synthesiseChapter hands normaliseForTts(group.text, langCode) to the
+       sidecar — the QA expectations run the SAME function, so collapsing
+       here cannot produce false ASR drift. */
+    expect(normaliseForTts('Он уснул: ЗЗЗЗЗЗ. Хор.', 'ru')).toBe(
+      'Он уснул: З-з-з. Хор.',
+    );
+    const once = normaliseForTts('ззззззззз');
+    expect(normaliseForTts(once)).toBe(once);
   });
 });

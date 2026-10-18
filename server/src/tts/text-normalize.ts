@@ -25,6 +25,11 @@
      and crash the tokenizer the same way.
    - Decomposed Unicode (NFD) diacritics — "é" as U+0065 + U+0301 — confuse
      the tokenizer on edge cases; composed (NFC) is the safe canonical form.
+   - Held-letter runs from published prose — snoring "ЗЗЗЗЗЗ", stretched
+     "иииии", hissed "ссссс" — are read literally by the autoregressive
+     decoder as a letter-by-letter garble storm. Spelling them out with
+     hyphens ("З-з-з") makes the same letters land as a natural drawn-out
+     sound.
 
    The fix is to compose all of these in `normaliseForTts`, the single entry
    point used by `synthesiseChapter`. Each transform is exported so a future
@@ -62,6 +67,12 @@ const LEADING_DASH = /^\s*[–—]\s*/;
    collapsed so "She said [emphatic] hello." → "She said hello." rather
    than "She said  hello." (note doubled space). */
 const AUDIO_TAG_RUN = new RegExp(`\\s*\\[(?:${AUDIO_TAGS.join('|')})\\]\\s*`, 'gi');
+
+/* A run of >=5 identical letters (case-insensitive, any script, hence \p{L}
+   with `iu`). 4 is left alone on purpose: ordinary emphatic spelling is
+   short enough for the model to render; 5+ is where the decoder starts
+   reading letters out one by one. */
+const LETTER_RUN = /(\p{L})\1{4,}/giu;
 
 /* Zero-width + bidi format chars. Codepoints (all written as \u escapes so
    the source is auditable — these glyphs are invisible in a normal editor):
@@ -156,6 +167,17 @@ export function stripAudioTags(text: string): string {
   return text.replace(AUDIO_TAG_RUN, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/** Collapse held-letter runs (see `LETTER_RUN`) into a spelled form: the
+    first occurrence keeps its original case, the rest are lowercase, joined
+    by hyphens so the decoder hears pauses — "ЗЗЗЗЗЗ" -> "З-з-з". Idempotent:
+    a spelled-out "з-з-з" has no run of >=5 to match. */
+export function collapseLetterRepeats(text: string): string {
+  return text.replace(
+    LETTER_RUN,
+    (run) => run[0] + '-' + run[0].toLowerCase() + '-' + run[0].toLowerCase(),
+  );
+}
+
 /** Compose the TTS-bound transforms. Apply this immediately before handing
     text to a TTS provider — do NOT mutate the underlying SentenceOutput,
     since the original text still drives UI segment captions, manuscript
@@ -173,6 +195,8 @@ export function stripAudioTags(text: string): string {
     self-gates: it no-ops unless the language is supported and has a registered
     engine, so an unsupported/dormant code is also a pass-through. */
 export function normaliseForTts(text: string, langCode?: string): string {
-  const base = stripAudioTags(softenDashes(denormaliseAllCaps(stripUnsafeForTts(text))));
+  const base = collapseLetterRepeats(
+    stripAudioTags(softenDashes(denormaliseAllCaps(stripUnsafeForTts(text)))),
+  );
   return langCode ? expandForSpeech(base, langCode) : base;
 }
