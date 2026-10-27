@@ -1290,11 +1290,16 @@ export interface paths {
          *     analysis`). Each `data: <json>` payload follows the GenerationTick
          *     schema. Synthesises chapters one at a time; per-chapter completion
          *     writes `audio/<chapterSlug>.mp3` + `audio/<chapterSlug>.segments.json`
-         *     into the workspace book directory. On every new subscriber (cold
-         *     connect AND post-reconnect during dev `tsx watch` restarts or
-         *     production server bounce), the server emits a `resume_from` ack as
-         *     the first event carrying the snapshot of completed chapter ids for
-         *     the active queue entry so the reconnect doesn't replay. See plan
+         *     into the workspace book directory. A reconnect sends `resume: true`
+         *     with the original model, chapter ids and queue entry id, omitting
+         *     `force`. It only subscribes to that matching live attempt; it never
+         *     starts synthesis or displaces another job. A missing, aborted or
+         *     mismatched attempt returns scoped `chapter_failed` followed by `idle`,
+         *     asking for explicit Retry. Existing audio is not evidence that a forced
+         *     regeneration finished. Queue jobs allow a 30-second grace after their
+         *     last subscriber disconnects, cancelled by a successful reattach;
+         *     explicit pause remains immediate. Successful subscribers receive a
+         *     `resume_from` ack first, followed by the current progress. See plan
          *     `docs/features/archive/102-global-queue-modal.md`.
          */
         post: operations["streamGeneration"];
@@ -8161,6 +8166,13 @@ export interface operations {
                     chapterIds?: number[];
                     /** @description Re-synthesise even if an audio file already exists on disk. */
                     force?: boolean;
+                    /**
+                     * @description Subscribe only to the matching live attempt with the original modelKey, chapterIds and queueEntryId. Never starts synthesis, even if force is also supplied. Omit force on reconnect; missing or mismatched attempts fail with chapter_failed then idle and require explicit Retry.
+                     * @default false
+                     */
+                    resume?: boolean;
+                    /** @description Workspace queue entry this request fulfills. Resume must match this id when supplied; ticks echo it for correlation. */
+                    queueEntryId?: string;
                 };
             };
         };

@@ -71,6 +71,28 @@ test.describe('queue modal (plan 102 / 111)', () => {
     await expect(page.getByText(/2 entries pending/i)).toBeVisible();
   });
 
+  test('hard reload restores live generation activity while the paused queue keeps siblings queued', async ({ page }) => {
+    /* Seed the server-side snapshot through the existing mock-queue hook.
+       The real Layout mount must load it and establish an observer before
+       the user opens any modal. SSE request semantics are covered by the
+       API/server tests; this browser check covers boot, routing and layout. */
+    await seedQueue(page, [
+      e({ id: 'live', bookId: 'cc', chapterId: 2, status: 'in_progress' }),
+      e({ id: 'waiting', bookId: 'cc', chapterId: 3 }),
+    ]);
+    await page.goto('/#/books/cc/generate');
+    await expect(page.getByTestId('status-pill')).toContainText('Generating');
+
+    await page.reload();
+    await expect(page).toHaveURL(/#\/books\/cc\/generate/);
+    await expect(page.getByTestId('status-pill')).toContainText('Generating');
+
+    await page.getByTestId('topbar-queue-chip').click();
+    await expect(page.getByRole('dialog', { name: /Generation queue/i })).toBeVisible();
+    await expect(page.getByTestId('queue-entry-live-status')).toHaveText('In flight');
+    await expect(page.getByTestId('queue-entry-waiting-status')).toHaveText('Queued');
+  });
+
   test('cancel button removes the entry and re-renders the modal', async ({ page }) => {
     await seedQueue(page, [e({ id: 'e-cancel', bookId: 'sb', chapterId: 5 })]);
     await page.goto('/#/books/sb/listen');
@@ -85,10 +107,8 @@ test.describe('queue modal (plan 102 / 111)', () => {
   test('force-remove clears a stuck in_progress entry that normal cancel can’t reach', async ({
     page,
   }) => {
-    /* A seeded in_progress entry with the dispatcher's in-memory inFlight map
-       empty (fresh load) is the stuck/orphaned case: it's never reconciled or
-       re-claimed, and the normal cancel button is hidden + the route 409s. The
-       force-remove control is the only way out. */
+    /* An in_progress entry has no normal cancel control and the route 409s.
+       Force-remove remains available even after cold-boot observation. */
     await seedQueue(page, [e({ id: 'e-stuck', bookId: 'sb', chapterId: 7, status: 'in_progress' })]);
     await page.goto('/#/books/sb/listen');
     await page.getByTestId('topbar-queue-chip').waitFor({ state: 'visible', timeout: 10_000 });

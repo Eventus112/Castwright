@@ -112,12 +112,13 @@ describe('describeSynthesisError', () => {
     expect(out.fatal).toBe(true);
   });
 
-  it('flags CUDA device-side assert as fatal with an auto-restart message', () => {
+  it('flags CUDA device-side assert as fatal with engine restart guidance', () => {
     /* The actual failure mode the screenshot pinned: the sidecar's GPT
        decoder hit an out-of-bounds embedding lookup, the CUDA context is
        now corrupted for the rest of the process, only a fresh Python
-       process recovers — start.ps1's supervisor loop catches the
-       sidecar's poison-code exit and respawns it. Classifying as fatal
+       process recovers. Recovery guidance asks for a restarted engine,
+       a green health pill and the original engine log, without assuming
+       every deployment supervises the sidecar. Classifying as fatal
        guarantees the user gets a single banner instead of the cascade
        detector burning two chapters' worth of identical 500s before it
        bails on its own. */
@@ -127,7 +128,9 @@ describe('describeSynthesisError', () => {
       ),
     );
     expect(out.fatal).toBe(true);
-    expect(out.errorReason).toMatch(/auto-restart/i);
+    expect(out.errorReason).toMatch(/restart/i);
+    expect(out.errorReason).toMatch(/pill.*green/i);
+    expect(out.errorReason).toMatch(/log.*original error/i);
     expect(out.errorReason).toMatch(/retry/i);
     expect(out.errorReason).toMatch(/cuda/i);
   });
@@ -144,7 +147,9 @@ describe('describeSynthesisError', () => {
       ),
     );
     expect(out.fatal).toBe(true);
-    expect(out.errorReason).toMatch(/auto-restart/i);
+    expect(out.errorReason).toMatch(/restart/i);
+    expect(out.errorReason).toMatch(/pill.*green/i);
+    expect(out.errorReason).toMatch(/log.*original error/i);
   });
 
   it('returns the raw message as non-fatal for unknown errors', () => {

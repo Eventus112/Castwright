@@ -87,7 +87,7 @@ describe('classifyFailure', () => {
     );
     expect(out.code).toBe('cuda-poisoned');
     expect(out.fatal).toBe(true);
-    expect(out.userMessage).toMatch(/auto-restart/i);
+    expect(out.userMessage).toMatch(/restart/i);
     expect(out.userMessage).toMatch(/retry/i);
   });
 

@@ -47,7 +47,7 @@ A sidecar host-RAM leak (plan 141) OOM-killed the Node server mid-run. Two laten
 ## Architectural impact
 
 - **New seams:** `onExit` on `SpawnSidecarOpts`; the supervisor module (start/stop/current); `serializeQueueMutation` + `markQueueEntryDoneOnDisk` in `generation.ts`.
-- **Invariants preserved:** `spawnSidecar`'s null-return contract; the stale-sidecar handshake; the frontend-owned queue lifecycle still works (server completion is additive + idempotent); the srv-12 orphan-recovery guards (last-subscriber + registration check) are unchanged beyond routing through the serializer.
+- **Invariants preserved:** `spawnSidecar`'s null-return contract; the stale-sidecar handshake; the frontend-owned queue lifecycle still works (server completion is additive + idempotent). The srv-12 last-subscriber/registration guards run after a cancellable 30-second disconnect grace and recheck abort state inside the serializer (2026-10-26 reconnect correction, plan 139). Subscribe-only resume never enters Hook 2, so pre-existing audio cannot complete an unavailable forced attempt.
 - **Reversibility:** revert the four files; no schema/data migration (queue + state shapes unchanged).
 
 ## Invariants to preserve

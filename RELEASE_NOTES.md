@@ -1,5 +1,7 @@
 # Castwright 1.15.0
 
+- **A brief connection drop no longer restarts a chapter you are recording.** Castwright reconnects to the same attempt and keeps its progress. If that attempt is gone, it shows a clear failure with Retry and frees the queue to continue. CUDA recovery guidance now asks you to restart the voice engine if needed and check its original error log, without guessing that your manuscript caused it.
+
 - **CI's weekly quarantine check now catches when it can't read the register.** The automation that tracks which tests are known to be flaky used to parse the register's format incorrectly and silently report a false clean — now it either reads successfully or reports the failure instead, so a broken parse won't hide the problem until someone notices weeks later.
 
 - **GPU speech synthesis works correctly again on NVIDIA boxes.** The speech-engine library was pinned to a version newer than the rest of Castwright's stack is built for, causing it to silently fall back to your CPU instead of using your GPU. Every sentence ran slower with no warning that your graphics card wasn't being used. The library versions are now aligned, so your GPU does the work again and gives you audio at GPU speed.

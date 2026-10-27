@@ -1,133 +1,205 @@
-/* Plan 102 — realStreamGeneration auto-reconnects on unexpected SSE end.
- *
- * Two scenarios verified:
- *   1. Stream ends cleanly with no `idle` tick after at least one real tick →
- *      reconnect once, deliver the next batch of ticks.
- *   2. Stream ends with an `idle` tick → no reconnect (queue drained naturally).
- *   3. Caller cancels via the returned canceller → no reconnect, even if no
- *      idle tick was seen (user-initiated stop).
- *
- * Mocks `fetch` to return a streaming Response whose ReadableStream emits a
- * controlled sequence of SSE frames, then closes. The reconnect strategy
- * matches plan 102 invariant 6 (the resume_from server-side ack is the
- * complementary piece, tested separately in
- * server/src/routes/generation-resume-from.test.ts). */
-
+/* Reconnects attach to the same attempt and always release the runner. */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { GenerationTick } from './types';
 
 let fetchMock: ReturnType<typeof vi.fn>;
-
 beforeEach(() => {
+  vi.useFakeTimers();
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
 });
-
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
-
-/** Build a Response whose body emits the given SSE frames then closes. */
-function sseResponse(frames: string[]): Response {
+function sseResponse(ticks: object[]): Response {
   const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const frame of frames) {
-        controller.enqueue(encoder.encode(`data: ${frame}\n\n`));
-      }
-      controller.close();
-    },
-  });
   return {
     ok: true,
     status: 200,
     statusText: 'OK',
-    body: stream,
-    text: () => Promise.resolve(''),
-  } as unknown as Response;
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const tick of ticks)
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(tick)}\n\n`));
+        controller.close();
+      },
+    }),
+    text: async () => '',
+  } as Response;
 }
-
-/** Wait one macrotask so awaited fetches settle. */
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
+async function start() {
+  const { api } = await import('./api');
+  const ticks: GenerationTick[] = [];
+  const cancel = api.streamGeneration({
+    bookId: 'book-A',
+    modelKey: 'kokoro-v1',
+    chapterIds: [1],
+    force: true,
+    queueEntryId: 'queue-entry-xyz',
+    onTick: (tick) => ticks.push(tick),
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  return { ticks, cancel };
+}
+const scoped = { chapterId: 1, queueEntryId: 'queue-entry-xyz' };
 
 describe('realStreamGeneration auto-reconnect', () => {
-  it('reconnects when the stream closes without an idle tick after seeing ticks', async () => {
+  it('sends resume on the first request for a reloaded live attempt, omitting force', async () => {
     const { api } = await import('./api');
-    /* First fetch: emit one progress tick then close (simulates tsx watch
-       restart mid-run). Second fetch: emit a chapter_complete + idle. */
-    fetchMock
-      .mockResolvedValueOnce(sseResponse([JSON.stringify({ type: 'progress', progress: 0.3 })]))
-      .mockResolvedValueOnce(
-        sseResponse([
-          JSON.stringify({ type: 'chapter_complete', chapterId: 1 }),
-          JSON.stringify({ type: 'idle' }),
-        ]),
-      );
-    const ticks: { type: string }[] = [];
-    const cancel = api.streamGeneration({
+    fetchMock.mockResolvedValueOnce(sseResponse([{ type: 'idle' }]));
+    api.streamGeneration({
       bookId: 'book-A',
       modelKey: 'kokoro-v1',
       chapterIds: [1],
-      queueEntryId: 'queue-entry-xyz',
-      onTick: (t) => ticks.push(t),
+      queueEntryId: scoped.queueEntryId,
+      resume: true,
+      force: true,
+      onTick: () => {},
     });
-    /* Wait long enough for backoff (500ms) + second fetch + tick parsing. */
-    await new Promise((r) => setTimeout(r, 800));
-    cancel();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    /* Both fetches POSTed with the same body — queueEntryId is preserved. */
-    expect(fetchMock.mock.calls[0][1].body).toContain('"queueEntryId":"queue-entry-xyz"');
-    expect(fetchMock.mock.calls[1][1].body).toContain('"queueEntryId":"queue-entry-xyz"');
-    /* All ticks delivered: progress + chapter_complete + idle. */
-    expect(ticks.map((t) => t.type)).toEqual(['progress', 'chapter_complete', 'idle']);
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      modelKey: 'kokoro-v1',
+      chapterIds: [1],
+      queueEntryId: scoped.queueEntryId,
+      resume: true,
+    });
   });
 
-  it('does NOT reconnect after receiving the idle tick (clean queue drain)', async () => {
-    const { api } = await import('./api');
-    fetchMock.mockResolvedValueOnce(
-      sseResponse([JSON.stringify({ type: 'progress' }), JSON.stringify({ type: 'idle' })]),
-    );
-    const ticks: { type: string }[] = [];
-    api.streamGeneration({
-      bookId: 'book-A',
+  it('uses resume only on reconnect, retaining the target and omitting force', async () => {
+    fetchMock
+      .mockResolvedValueOnce(sseResponse([{ type: 'progress', chapterId: 1, progress: 0.3 }]))
+      .mockResolvedValueOnce(
+        sseResponse([{ type: 'chapter_complete', chapterId: 1 }, { type: 'idle' }]),
+      );
+    const { ticks } = await start();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       modelKey: 'kokoro-v1',
-      onTick: (t) => ticks.push(t),
+      chapterIds: [1],
+      force: true,
+      queueEntryId: scoped.queueEntryId,
     });
-    await flush();
-    await new Promise((r) => setTimeout(r, 600));
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      modelKey: 'kokoro-v1',
+      chapterIds: [1],
+      resume: true,
+      queueEntryId: scoped.queueEntryId,
+    });
+    expect(ticks.map((t) => t.type)).toEqual(['progress', 'chapter_complete', 'idle']);
+  });
+  it('does not reconnect after idle', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([{ type: 'progress' }, { type: 'idle' }]));
+    const { ticks } = await start();
+    await vi.runAllTimersAsync();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(ticks.map((t) => t.type)).toEqual(['progress', 'idle']);
   });
-
-  it('does NOT reconnect when cancelled by the caller mid-stream', async () => {
-    const { api } = await import('./api');
-    fetchMock.mockResolvedValueOnce(
-      sseResponse([JSON.stringify({ type: 'progress' })]),
-      /* Second fetch would happen IF we reconnected — gate with a flag. */
-    );
-    const ticks: { type: string }[] = [];
-    const cancel = api.streamGeneration({
-      bookId: 'book-A',
-      modelKey: 'kokoro-v1',
-      onTick: (t) => ticks.push(t),
-    });
-    await flush();
-    cancel();
-    await new Promise((r) => setTimeout(r, 700));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it.each(['chapter_complete', 'chapter_failed'] as const)(
+    'ends with idle after target %s without retrying or replacing the payload',
+    async (type) => {
+      const terminal = {
+        type,
+        ...scoped,
+        errorReason: 'Original CUDA error',
+        errorCode: 'cuda-poisoned',
+        remediation: 'Restart engine',
+      };
+      fetchMock.mockResolvedValueOnce(sseResponse([terminal]));
+      const { ticks } = await start();
+      await vi.runAllTimersAsync();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(ticks).toEqual([terminal, { type: 'idle' }]);
+    },
+  );
+  it('ignores sibling catch-up completions when deciding whether the target ended', async () => {
+    fetchMock
+      .mockResolvedValueOnce(sseResponse([{ type: 'chapter_complete', chapterId: 2 }]))
+      .mockResolvedValueOnce(sseResponse([{ type: 'chapter_complete', chapterId: 1 }]));
+    const { ticks } = await start();
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ticks.map((t) => t.type)).toEqual(['chapter_complete', 'chapter_complete', 'idle']);
   });
-
-  it('does NOT reconnect when the FIRST fetch never delivered a tick (setup error)', async () => {
-    const { api } = await import('./api');
-    /* Empty stream — server closed immediately. */
-    fetchMock.mockResolvedValueOnce(sseResponse([]));
-    const ticks: { type: string }[] = [];
-    api.streamGeneration({
-      bookId: 'book-A',
-      modelKey: 'kokoro-v1',
-      onTick: (t) => ticks.push(t),
-    });
-    await new Promise((r) => setTimeout(r, 600));
-    /* Only one fetch (no reconnect). */
+  it('scopes a setup failure and supplies idle without replacing its original reason', async () => {
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        { type: 'chapter_failed', errorReason: 'Cast not confirmed', remediation: 'Open cast' },
+      ]),
+    );
+    const { ticks } = await start();
+    await vi.runAllTimersAsync();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ticks).toEqual([
+      {
+        type: 'chapter_failed',
+        ...scoped,
+        errorReason: 'Cast not confirmed',
+        remediation: 'Open cast',
+      },
+      { type: 'idle' },
+    ]);
+  });
+  it.each(['empty', 'http', 'network'])(
+    'releases the target runner after a final %s setup error',
+    async (kind) => {
+      if (kind === 'empty') fetchMock.mockResolvedValueOnce(sseResponse([]));
+      if (kind === 'http')
+        fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          text: async () => 'Unavailable',
+        });
+      if (kind === 'network') fetchMock.mockRejectedValueOnce(new Error('Network unavailable'));
+      const { ticks } = await start();
+      await vi.runAllTimersAsync();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(ticks).toEqual([
+        expect.objectContaining({
+          type: 'chapter_failed',
+          ...scoped,
+          errorReason: expect.any(String),
+        }),
+        { type: 'idle' },
+      ]);
+    },
+  );
+  it('exhausts reconnects with a scoped failure and idle', async () => {
+    fetchMock.mockImplementation(async () => sseResponse([{ type: 'progress', chapterId: 1 }]));
+    const { ticks } = await start();
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(ticks.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: 'chapter_failed',
+        ...scoped,
+        errorReason: expect.stringMatching(/Retry/),
+      }),
+      { type: 'idle' },
+    ]);
+  });
+  it('stays quiet when cancelled during reconnect backoff', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([{ type: 'progress', chapterId: 1 }]));
+    const { ticks, cancel } = await start();
+    cancel();
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ticks.map((t) => t.type)).toEqual(['progress']);
+  });
+  it('stays quiet when a pending first fetch is cancelled', async () => {
+    fetchMock.mockImplementation(
+      (_url, opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          );
+        }),
+    );
+    const { ticks, cancel } = await start();
+    cancel();
+    await vi.runAllTimersAsync();
+    expect(ticks).toEqual([]);
   });
 });

@@ -1,138 +1,165 @@
-/* srv-12 — orphan recovery on SSE last-subscriber disconnect.
- *
- * When the LAST subscriber to a generation SSE closes BEFORE the frontend
- * POSTs /complete, the in-flight chapter's queue entry is an orphan (the
- * watcher vanished mid-run). The route then (a) resets that entry
- * `in_progress`→`queued` so the dispatcher re-claims it, and (b) aborts the
- * now-unwatched synthesis to free the GPU.
- *
- * The happy path POSTs /complete BEFORE the SSE closes, so a clean
- * disconnect-after-completion must NOT reset anything.
- *
- * Unlike the supertest-based suites, this test needs a REAL socket it can tear
- * down mid-stream, so it boots an http.Server and drives it with node's
- * http.request — `clientReq.destroy()` triggers the route's `req.on('close')`
- * while the synth is still blocked (job still registered, entry still
- * in_progress). */
-
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+/* Response-close events and fake timers pin reconnect/orphan behavior without
+   sockets, polling budgets, real synthesis, or encoding. */
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import express, { type Express } from 'express';
+import type { Request, Response } from '../http.js';
 
-let synthesiseImpl: (args: unknown) => Promise<unknown>;
-vi.mock('../tts/synthesise-chapter.js', async (importOriginal) => {
-  /* Spread the real module so the route's other imports from here
-     (toVoiceLike + buildHintFromCast, pure transforms used to build the
-     per-character snapshot) keep working; only synthesiseChapter is stubbed. */
-  const actual = await importOriginal<typeof import('../tts/synthesise-chapter.js')>();
+type SynthArgs = { signal: AbortSignal; onGroupComplete: (tick: object) => void };
+let synthesiseImpl: (args: SynthArgs) => Promise<unknown>;
+const synth = vi.fn((args: SynthArgs) => synthesiseImpl(args));
+const selectProvider = vi.fn(() => ({ synthesize: vi.fn() }));
+let onQueueWrite: (() => void) | undefined;
+vi.mock('../tts/synthesise-chapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../tts/synthesise-chapter.js')>()),
+  synthesiseChapter: (args: SynthArgs) => synth(args),
+}));
+vi.mock('../tts/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../tts/index.js')>()),
+  selectTtsProvider: () => selectProvider(),
+}));
+vi.mock('../tts/ensure-sidecar-loaded.js', () => ({
+  ensureSidecarEngineReady: vi.fn(async () => undefined),
+  reconcileResidentQwenTiers: vi.fn(async () => undefined),
+  SIDECAR_ENGINES: new Set(),
+}));
+vi.mock('../system/prevent-sleep.js', () => ({ preventSleep: vi.fn(), allowSleep: vi.fn() }));
+vi.mock('../audio/finalize-chapter-write.js', () => ({
+  finalizeChapterAudioWrite: async () => ({
+    audioQa: { status: 'pass', reasons: [] },
+    audioModelKey: 'gemini-2.5-flash',
+    audioEngines: ['gemini'],
+  }),
+}));
+vi.mock('../workspace/queue-migrate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../workspace/queue-migrate.js')>();
   return {
     ...actual,
-    synthesiseChapter: (args: unknown) => synthesiseImpl(args),
+    writeQueueFile: async (...args: Parameters<typeof actual.writeQueueFile>) => {
+      await actual.writeQueueFile(...args);
+      onQueueWrite?.();
+    },
   };
 });
-vi.mock('../tts/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../tts/index.js')>();
-  return {
-    ...actual,
-    selectTtsProvider: () => ({ synthesize: vi.fn() }),
-  };
-});
-
-const AUTHOR = 'Test Author';
-const SERIES = 'Standalones';
-const TITLE = 'Orphan Recovery Test';
-const MANUSCRIPT_ID = 'm_orphan_recovery_test';
-
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+class SseResponse extends EventEmitter {
+  ticks: Record<string, unknown>[] = [];
+  setHeader() {}
+  flushHeaders() {}
+  write(frame: string) {
+    this.ticks.push(JSON.parse(frame.slice(6)));
+    return true;
+  }
+  end() {
+    this.emit('close');
+    return this;
+  }
+  status() {
+    return this;
+  }
+  json() {
+    return this.end();
+  }
+}
 let workspaceRoot: string;
 let bookDir: string;
-let app: Express;
-let server: import('node:http').Server;
-let baseUrl: string;
 let bookId: string;
 let queuePath: string;
-let readQueueFile: (path: string) => Promise<import('../workspace/queue-io.js').QueueFile>;
-let writeQueueFile: (
-  path: string,
-  file: import('../workspace/queue-io.js').QueueFile,
-) => Promise<void>;
-
+let generationRouter: import('express').Router;
+let readQueueFile: typeof import('../workspace/queue-migrate.js').readQueueFile;
+let writeQueueFile: typeof import('../workspace/queue-migrate.js').writeQueueFile;
+let pending: Promise<unknown>[] = [];
+let nextSynth = deferred<SynthArgs>();
+const ENTRY_ID = 'orphan-entry-1';
+const modelKey = 'gemini-2.5-flash';
+function dispatch(body: object, path = '/:bookId/generation') {
+  const layer = generationRouter.stack.find((entry) => entry.route?.path === path)!;
+  const req = Object.assign(new EventEmitter(), { params: { bookId }, body });
+  const res = new SseResponse();
+  const done = Promise.resolve(
+    layer.route!.stack[0].handle(req as unknown as Request, res as unknown as Response, vi.fn()),
+  );
+  pending.push(done);
+  return { res, done };
+}
+async function open(body: object = {}) {
+  nextSynth = deferred<SynthArgs>();
+  const stream = dispatch({
+    modelKey,
+    chapterIds: [1],
+    force: true,
+    queueEntryId: ENTRY_ID,
+    ...body,
+  });
+  await Promise.race([stream.done, nextSynth.promise]);
+  return stream;
+}
+function blockSynth() {
+  synthesiseImpl = (args) => {
+    nextSynth.resolve(args);
+    args.onGroupComplete({ group: { characterId: 'narrator' }, completed: 1, totalGroups: 4 });
+    return new Promise((_resolve, reject) => {
+      const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      if (args.signal.aborted) abort();
+      else args.signal.addEventListener('abort', abort, { once: true });
+    });
+  };
+}
+async function entryStatus() {
+  return (await readQueueFile(queuePath)).entries.find((e) => e.id === ENTRY_ID)?.status;
+}
 beforeAll(async () => {
-  workspaceRoot = await mkdtemp(join(tmpdir(), 'orphan-recovery-test-'));
+  workspaceRoot = await mkdtemp(join(tmpdir(), 'generation-reconnect-'));
   process.env.WORKSPACE_DIR = workspaceRoot;
   process.env.GEN_WORKERS = '1';
-
-  /* #2083 — sequential awaits, not Promise.all: a Promise.all of dynamic
-     imports here races the async vi.mock factories above (module-under-test can
-     receive the real binding instead of the mock). Measured latent for this
-     file — 0 failures in 14 runs (#2083's own survey) — not the live
-     ~2-in-5 rate, which belongs to voices.test.ts, a different file already
-     fixed under #2046. */
-  const { generationRouter } = await import('./generation.js');
-  const { makeBookId, queueJsonPath } = await import('../workspace/paths.js');
-  const cacheModule = await import('../store/analysis-cache.js');
-  const migrateModule = await import('../workspace/queue-migrate.js');
-  readQueueFile = migrateModule.readQueueFile;
-  writeQueueFile = migrateModule.writeQueueFile;
-
-  bookId = makeBookId(AUTHOR, SERIES, TITLE);
-  queuePath = queueJsonPath();
-  bookDir = join(workspaceRoot, 'books', AUTHOR, SERIES, TITLE);
+  ({ generationRouter } = await import('./generation.js'));
+  const paths = await import('../workspace/paths.js');
+  ({ readQueueFile, writeQueueFile } = await import('../workspace/queue-migrate.js'));
+  const cache = await import('../store/analysis-cache.js');
+  bookId = paths.makeBookId('Test Author', 'Standalones', 'Reconnect Test');
+  queuePath = paths.queueJsonPath();
+  bookDir = join(workspaceRoot, 'books', 'Test Author', 'Standalones', 'Reconnect Test');
   mkdirSync(join(bookDir, '.audiobook'), { recursive: true });
   mkdirSync(join(bookDir, 'audio'), { recursive: true });
-
   writeFileSync(
     join(bookDir, '.audiobook', 'state.json'),
     JSON.stringify({
       bookId,
-      manuscriptId: MANUSCRIPT_ID,
-      author: AUTHOR,
-      title: TITLE,
-      series: SERIES,
+      manuscriptId: 'm_reconnect_test',
+      author: 'Test Author',
+      title: 'Reconnect Test',
+      series: 'Standalones',
       updatedAt: '2026-05-23T00:00:00.000Z',
       schema: 1,
-      chapters: [{ id: 1, title: 'Chapter 1', slug: 'chapter-1' }],
+      chapters: [1, 2].map((id) => ({ id, title: `Chapter ${id}`, slug: `chapter-${id}` })),
     }),
   );
   writeFileSync(
     join(bookDir, '.audiobook', 'cast.json'),
-    JSON.stringify({
-      characters: [{ id: 'narrator', name: 'Narrator', voiceId: 'af_alloy' }],
-    }),
+    JSON.stringify({ characters: [{ id: 'narrator', name: 'Narrator', voiceId: 'af_alloy' }] }),
   );
-
-  await cacheModule.saveAnalysisCache(MANUSCRIPT_ID, {
+  await cache.saveAnalysisCache('m_reconnect_test', {
     chapters: {
       1: [{ id: 1, chapterId: 1, characterId: 'narrator', text: 'Hello.' }],
+      2: [{ id: 2, chapterId: 2, characterId: 'narrator', text: 'Goodbye.' }],
     },
   });
-
-  app = express();
-  app.use(express.json());
-  app.use('/api/books', generationRouter);
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => {
-      const addr = server.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      baseUrl = `http://127.0.0.1:${port}`;
-      resolve();
-    });
-  });
 });
-
-afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  const { rm } = await import('node:fs/promises');
-  await rm(workspaceRoot, { recursive: true, force: true });
-});
-
-const ENTRY_ID = 'orphan-entry-1';
-
 beforeEach(async () => {
-  /* Seed a queue with the chapter-1 entry already in_progress (the dispatcher
-     POSTs /start on claim, so a live run's entry is in_progress on disk). */
+  synth.mockClear();
+  selectProvider.mockClear();
+  pending = [];
+  onQueueWrite = undefined;
+  await rm(join(bookDir, 'audio', 'chapter-1.mp3'), { force: true });
   await writeQueueFile(queuePath, {
     entries: [
       {
@@ -147,159 +174,167 @@ beforeEach(async () => {
     ],
     paused: false,
   });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  blockSynth();
+});
+afterEach(async () => {
+  onQueueWrite = undefined;
+  dispatch({}, '/:bookId/generation/pause');
+  await Promise.all(pending);
+  vi.useRealTimers();
+});
+afterAll(async () => {
+  await rm(workspaceRoot, { recursive: true, force: true });
 });
 
-/* Open the SSE via fetch + AbortController so aborting mid-stream reliably
-   tears the socket down (which fires the route's server-side req.on('close')).
-   Resolves once the response headers have arrived (synth is blocked by then,
-   so the job is registered + the entry is in_progress). `destroy()` aborts the
-   fetch; `done` resolves once the body stream errors/ends. */
-function openStream(): Promise<{ destroy: () => void; done: Promise<void> }> {
-  const controller = new AbortController();
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const drain = fetch(`${baseUrl}/api/books/${bookId}/generation`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        modelKey: 'gemini-2.5-flash',
-        chapterIds: [1],
-        force: true,
+describe('generation reconnect and orphan grace', () => {
+  it('keeps a forced run alive through a drop and scoped resume, preserving progress with one synth', async () => {
+    const starter = await open();
+    const signal = synth.mock.calls[0][0].signal;
+    starter.res.emit('close');
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    const resumed = await open({ resume: true, force: undefined });
+    expect(synth).toHaveBeenCalledTimes(1);
+    expect(selectProvider).toHaveBeenCalledTimes(1);
+    expect(resumed.res.ticks[0]).toMatchObject({ type: 'resume_from', queueEntryId: ENTRY_ID });
+    expect(resumed.res.ticks).toContainEqual(
+      expect.objectContaining({
+        type: 'progress',
+        chapterId: 1,
+        progress: 0.25,
         queueEntryId: ENTRY_ID,
       }),
-      signal: controller.signal,
-    })
-      .then(async (res) => {
-        settled = true;
-        const reader = res.body!.getReader();
-        const done = (async () => {
-          try {
-            for (;;) {
-              const { done: d } = await reader.read();
-              if (d) break;
-            }
-          } catch {
-            /* abort surfaces here — that's the disconnect we're testing. */
-          }
-        })();
-        resolve({ destroy: () => controller.abort(), done });
-      })
-      .catch((err) => {
-        if (!settled) reject(err);
-      });
-    void drain;
-    setTimeout(() => {
-      if (!settled) reject(new Error('stream never started'));
-    }, 4000).unref();
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(signal.aborted).toBe(false);
+    expect(await entryStatus()).toBe('in_progress');
+    const queued = deferred();
+    onQueueWrite = () => queued.resolve();
+    resumed.res.emit('close');
+    await vi.advanceTimersByTimeAsync(30_000);
+    await queued.promise;
+    expect(signal.aborted).toBe(true);
+    expect(await entryStatus()).toBe('queued');
   });
-}
-
-async function readEntryStatus(): Promise<string | undefined> {
-  const file = await readQueueFile(queuePath);
-  return file.entries.find((e) => e.id === ENTRY_ID)?.status;
-}
-
-describe('srv-12 orphan recovery on SSE last-subscriber disconnect', () => {
-  it('resets the in_progress entry to queued AND aborts synth when the last subscriber disconnects mid-run', async () => {
-    let resolveStarted: () => void;
-    const started = new Promise<void>((r) => {
-      resolveStarted = r;
+  it('only aborts and requeues an orphan after the full 30-second grace', async () => {
+    const stream = await open();
+    const signal = synth.mock.calls[0][0].signal;
+    stream.res.emit('close');
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(signal.aborted).toBe(false);
+    expect(await entryStatus()).toBe('in_progress');
+    const queued = deferred();
+    onQueueWrite = () => queued.resolve();
+    await vi.advanceTimersByTimeAsync(1);
+    await queued.promise;
+    expect(signal.aborted).toBe(true);
+    expect(await entryStatus()).toBe('queued');
+  });
+  it('attaches only to its own chapter and queue while a sibling keeps running', async () => {
+    const own = await open();
+    const sibling = await open({ chapterIds: [2], queueEntryId: 'entry-two' });
+    const ownSignal = synth.mock.calls[0][0].signal;
+    const siblingSignal = synth.mock.calls[1][0].signal;
+    own.res.emit('close');
+    /* resume wins over force even if a caller mistakenly sends both. */
+    const resumed = await open({ resume: true });
+    expect(synth).toHaveBeenCalledTimes(2);
+    expect(resumed.res.ticks.filter((t) => t.type === 'progress').map((t) => t.chapterId)).toEqual([
+      1,
+    ]);
+    expect(sibling.res.ticks.some((t) => t.type === 'progress' && t.chapterId === 1)).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(ownSignal.aborted).toBe(false);
+    expect(siblingSignal.aborted).toBe(false);
+  });
+  it('legacy non-queue subscriptions keep running after every observer disconnects', async () => {
+    const starter = await open({ queueEntryId: undefined });
+    const resumed = await open({
+      chapterIds: undefined,
+      force: undefined,
+      queueEntryId: undefined,
     });
-    let aborted = false;
-    /* Synth blocks until the signal aborts — proving the route aborted it. */
-    synthesiseImpl = (args: unknown) => {
-      const signal = (args as { signal?: AbortSignal }).signal;
-      return new Promise((_resolve, reject) => {
-        const fail = () => {
-          aborted = true;
-          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-        };
-        if (signal?.aborted) return fail();
-        signal?.addEventListener('abort', fail, { once: true });
-        resolveStarted();
-      });
-    };
-
-    const stream = await openStream();
-    await started; // synth is now blocked, job registered, entry in_progress
-    stream.destroy(); // simulate the last subscriber vanishing
-    await stream.done; // server-side req.on('close') has fired
-
-    /* Give the async reset + abort a tick to settle. */
-    await vi.waitFor(async () => {
-      expect(await readEntryStatus()).toBe('queued');
-    });
-    expect(aborted).toBe(true);
-  }, 10_000);
-
-  it('done-prunes the entry server-side on a completed run (srv-16) — and never resets it to queued', async () => {
-    /* Synth resolves immediately → the loop runs to completion and
-       deregisterJob fires BEFORE we tear the socket down. Two things must hold:
-       (1) srv-16 — the SERVER marks the queue entry done (pruned) right after
-       the chapter renders, so completion no longer depends on the frontend
-       POSTing /complete (a hard kill / closed tab used to leave it stuck
-       in_progress forever); (2) srv-12 — orphan recovery must NOT reset it to
-       `queued` (the close handler's registration guard skips the deregistered,
-       completed job). So the entry ends up GONE, and specifically not queued. */
-    synthesiseImpl = async () => ({
-      pcm: Buffer.alloc(2),
-      sampleRate: 24000,
-      durationSec: 1,
-      segments: [
-        {
-          characterId: 'narrator',
-          voiceName: 'af_alloy',
-          sampleStart: 0,
-          sampleEnd: 1,
-          sentenceIds: [1],
-        },
-      ],
-    });
-
-    const stream = await openStream();
-    /* Wait for the run to fully drain (idle + response close) before destroying. */
-    await stream.done;
-    stream.destroy();
-
-    /* srv-16: the server-side completion removes the entry on render. Give the
-       async (serialized) mutation a tick, then assert it's gone — and was never
-       flipped to `queued` by orphan recovery. */
-    await vi.waitFor(async () => {
-      expect(await readEntryStatus()).toBeUndefined();
-    });
-  }, 10_000);
-});
-
-describe('srv-16 server completion when the target chapter is already on disk', () => {
-  it('done-prunes a queue entry whose chapter audio already exists, without re-rendering', async () => {
-    /* Simulates the restart-after-crash case: chapter 1 was rendered before the
-       crash (audio on disk) and its queue entry was re-queued then re-claimed
-       (in_progress, seeded by beforeEach). A non-force generation POST for it
-       finds the audio present → renders nothing → no chapter_complete → Hook 1
-       can't fire. Hook 2 must complete the entry anyway, or it loops
-       in_progress↔queued forever across boots. */
+    starter.res.emit('close');
+    resumed.res.emit('close');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(synth).toHaveBeenCalledTimes(1);
+    expect(synth.mock.calls[0][0].signal.aborted).toBe(false);
+  });
+  it.each([{ chapterIds: [2] }, { queueEntryId: 'another-entry' }, { modelKey: 'kokoro-v1' }])(
+    'rejects a mismatched resume without touching another job: %j',
+    async (mismatch) => {
+      await open();
+      const signal = synth.mock.calls[0][0].signal;
+      const resumed = await open({ resume: true, ...mismatch });
+      expect(resumed.res.ticks).toEqual([
+        expect.objectContaining({
+          type: 'chapter_failed',
+          chapterId: mismatch.chapterIds?.[0] ?? 1,
+          queueEntryId: mismatch.queueEntryId ?? ENTRY_ID,
+          errorReason: expect.stringMatching(/Retry/),
+        }),
+        { type: 'idle' },
+      ]);
+      expect(synth).toHaveBeenCalledTimes(1);
+      expect(signal.aborted).toBe(false);
+    },
+  );
+  it('never starts an absent attempt or claims an old forced-regeneration MP3 completed it', async () => {
     writeFileSync(join(bookDir, 'audio', 'chapter-1.mp3'), Buffer.from([0, 0]));
-    let synthCalled = false;
-    synthesiseImpl = async () => {
-      synthCalled = true;
-      return { pcm: Buffer.alloc(2), sampleRate: 24000, durationSec: 1, segments: [] };
+    const resumed = await open({ resume: true, force: undefined });
+    expect(synth).not.toHaveBeenCalled();
+    expect(resumed.res.ticks.map((t) => t.type)).toEqual(['chapter_failed', 'idle']);
+    expect(await entryStatus()).toBe('in_progress');
+  });
+  it('does not resume an aborted job and explicit pause still aborts immediately', async () => {
+    const stream = await open();
+    const signal = synth.mock.calls[0][0].signal;
+    stream.res.emit('close');
+    expect(vi.getTimerCount()).toBe(1);
+    dispatch({}, '/:bookId/generation/pause');
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    const resumed = await open({ resume: true });
+    expect(resumed.res.ticks.map((t) => t.type)).toEqual(['chapter_failed', 'idle']);
+    expect(synth).toHaveBeenCalledTimes(1);
+  });
+  it('ordinary explicit regeneration still displaces the same chapter', async () => {
+    const stream = await open();
+    const oldSignal = synth.mock.calls[0][0].signal;
+    stream.res.emit('close');
+    expect(vi.getTimerCount()).toBe(1);
+    await open();
+    expect(oldSignal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(synth).toHaveBeenCalledTimes(2);
+    expect(synth.mock.calls[1][0].signal.aborted).toBe(false);
+  });
+  it('does not reset a completed job after its disconnected grace timer would expire', async () => {
+    const completed = deferred<unknown>();
+    synthesiseImpl = (args) => {
+      nextSynth.resolve(args);
+      return completed.promise;
     };
-
-    /* No `force` → the audio-exists check excludes the chapter from targets. We
-       don't need to drain the SSE; Hook 2 runs server-side as the request is
-       handled. Abort once the entry is gone. */
-    const controller = new AbortController();
-    void fetch(`${baseUrl}/api/books/${bookId}/generation`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelKey: 'gemini-2.5-flash', chapterIds: [1], queueEntryId: ENTRY_ID }),
-      signal: controller.signal,
-    }).catch(() => undefined);
-
-    await vi.waitFor(async () => {
-      expect(await readEntryStatus()).toBeUndefined();
-    });
-    controller.abort();
-    expect(synthCalled).toBe(false); // never rendered — audio already on disk
-  }, 10_000);
+    const stream = await open();
+    stream.res.emit('close');
+    const doneWrite = deferred();
+    onQueueWrite = () => doneWrite.resolve();
+    completed.resolve({ pcm: Buffer.alloc(2), sampleRate: 24_000, durationSec: 1, segments: [] });
+    await stream.done;
+    await doneWrite.promise;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await entryStatus()).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('still done-prunes an ordinary non-force queue request for existing audio', async () => {
+    writeFileSync(join(bookDir, 'audio', 'chapter-1.mp3'), Buffer.from([0, 0]));
+    const doneWrite = deferred();
+    onQueueWrite = () => doneWrite.resolve();
+    const stream = await open({ force: undefined });
+    await stream.done;
+    await doneWrite.promise;
+    expect(await entryStatus()).toBeUndefined();
+    expect(synth).not.toHaveBeenCalled();
+  });
 });

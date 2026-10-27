@@ -17,6 +17,9 @@
  *      now, so a user-cancel DELETE would 409). Chapter-level, so an entry
  *      leaves the queue the instant its own chapter completes, independent of
  *      siblings.
+ *   Before fills, ADOPT persisted in_progress entries with no local owner
+ *   through resume-only observers. These count against N even while paused /
+ *   recycling or when a lowered worker limit is below the live job count.
  *   2. FILL TO N — claim up to (N − inFlight) queued entries from the flat
  *      queue across books, opening ONE stream per claimed entry (one chapter
  *      each, force:true). On claim, POST /start to flip the entry to
@@ -34,9 +37,9 @@
  *     closes (the chapter is `done` by then); a done row is never re-claimed
  *     (entry gone) nor re-enqueued (the enqueue-on-work observer only enqueues
  *     queued/in_progress rows).
- *   - Same-book no-abort: each chapter rides its own forced request keyed
- *     `${bookId}::${chapterId}` server-side, so two same-book chapters never
- *     abort each other.
+ *   - Same-book no-abort: each new queued chapter starts its own forced
+ *     request keyed `${bookId}::${chapterId}` server-side; reload observers
+ *     attach with resume:true and never displace a live attempt.
  *
  * srv-11 — consecutive-failure circuit breaker: a per-book in-memory streak
  *   counts back-to-back IDENTICAL chapter-failure reasons; crossing the
@@ -80,12 +83,11 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
        the queue snapshot, so we can still DELETE it + reconcile per chapter. */
     const inFlight = new Map<string, { bookId: string; chapterId: number }>();
 
-    /* Entries we've fired a DELETE for but haven't yet seen leave the queue
-       snapshot (the server round-trip is async). They must NOT be re-claimed
-       in the same/next tick — that's the infinite-regen trap: a `done`
-       chapter's entry, still present in the snapshot, would otherwise be
-       picked up and re-generated. Pruned once the snapshot catches up. */
-    const completed = new Set<string>();
+    /* Closed streams awaiting a queue snapshot. Successful entries stay
+       blocked until removed, preventing a stale snapshot's regen loop.
+       Failed/parked entries stay blocked only while still in_progress, so
+       observing a stale row cannot reopen it and Retry/confirm can reclaim. */
+    const completed = new Map<string, 'done' | 'closed'>();
 
     /* srv-11 — per-book consecutive-IDENTICAL-failure streak. `count` only
        grows while the SAME error reason repeats back-to-back for a book; a
@@ -107,11 +109,13 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
       /* Cold-boot gate — wait for the initial GET /api/queue. */
       if (!queue.loaded) return;
 
-      /* Prune the pending-deletion set once the snapshot no longer lists an
-         entry — the server DELETE landed, so it's safe to forget. */
+      /* Forget closed entries once the authoritative snapshot catches up. */
       if (completed.size > 0) {
-        const live = new Set(queue.entries.map((e) => e.id));
-        for (const id of [...completed]) if (!live.has(id)) completed.delete(id);
+        const live = new Map(queue.entries.map((e) => [e.id, e.status]));
+        for (const [id, outcome] of completed) {
+          if (!live.has(id) || (outcome === 'closed' && live.get(id) !== 'in_progress'))
+            completed.delete(id);
+        }
       }
 
       /* STEP 1 — reconcile completions. An entry whose CHAPTER has no open
@@ -122,12 +126,13 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
       for (const [entryId, { bookId, chapterId }] of [...inFlight.entries()]) {
         if (!runner.hasOpenStreamForChapter(bookId, chapterId)) {
           inFlight.delete(entryId);
+          completed.set(entryId, 'closed');
           /* Loud-fallback gate: the worker PARKED this chapter (entry flipped to
              `awaiting_confirm`) and closed its stream without completing. Free
-             the slot but do NOT /complete it and do NOT add it to `completed` —
-             it must stay re-claimable once the user confirms it back to
-             `queued`. (A /complete would be a server no-op anyway, but adding it
-             to `completed` would wedge the confirmed re-dispatch.)
+             the slot without /complete; it must stay re-claimable once the
+             user confirms it back to `queued`. Keep the stale in_progress
+             snapshot blocked only until that status changes, so confirmation
+             can re-dispatch it.
 
              Asked of the RUNNER, not the queue slice's `status` field (#1284):
              nothing dispatches a queue-snapshot update off the park tick, so
@@ -142,9 +147,8 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
           }
           /* Did this chapter FAIL? If so, complete it as `failed` so the entry
              LINGERS in the queue (rendered "Failed · <reason>" with a Retry
-             control) instead of being done-pruned. Crucially we do NOT add a
-             failed entry to `completed` — a later Retry flips it back to
-             `queued`, and STEP 2 must be free to re-claim it then. */
+             control) instead of being done-pruned. Its temporary closed guard
+             clears when the snapshot changes status, allowing explicit Retry. */
           const failure = runner.takeChapterFailure(bookId, chapterId);
           if (failure != null) {
             void dispatch(
@@ -194,7 +198,7 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
                /complete done-prunes it. Remember it as pending so STEP 2 can't
                re-claim it before the snapshot catches up. Idempotent for an
                already-gone id; the next /api/queue snapshot reconciles. */
-            completed.add(entryId);
+            completed.set(entryId, 'done');
             /* srv-11 — a successful chapter resets the book's failure streak. */
             failureStreakByBook.delete(bookId);
             void dispatch(completeQueueEntry(entryId)).catch(() => {
@@ -202,6 +206,24 @@ export function queueDispatcherMiddleware(getRunner: () => StreamRunner): Middle
             });
           }
         }
+      }
+
+      /* A reload loses local ownership while the server keeps jobs alive
+         through its reconnect grace. Observe every persisted live entry
+         before gates/fills, even if the worker limit has since been lowered.
+         This must never /start or reset rows: resume only attaches to the
+         original attempt, and a missing attempt fails through normal cleanup. */
+      for (const e of queue.entries) {
+        if (e.status !== 'in_progress') continue;
+        if (inFlight.has(e.id) || completed.has(e.id)) continue;
+        if (runner.hasOpenStreamForChapter(e.bookId, e.chapterId)) continue;
+        inFlight.set(e.id, { bookId: e.bookId, chapterId: e.chapterId });
+        runner.open(
+          e.bookId,
+          e.modelKey ?? ui.ttsModelKey,
+          { chapterIds: [e.chapterId] },
+          { queueEntryId: e.id, chapterId: e.chapterId, resume: true },
+        );
       }
 
       /* Queue-global pause or sidecar-recycling stops NEW fills at the next

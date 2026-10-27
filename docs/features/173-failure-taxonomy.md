@@ -34,11 +34,13 @@ owner: null
 5. Analysis-side signatures are `source: 'analysis'` — the generation scan never
    sees them and its match ORDER is byte-identical to the pre-split table.
 6. `failure-remediations.ts` imports nothing (the frontend bundles it directly).
+7. CUDA remediation asks for a fresh engine process and a green health pill before Retry, then the original engine log if it recurs. It does not promise a fixed restart time, assume Docker supervision, or blame invisible manuscript characters; model/input/memory/driver causes remain possible.
 
 ## Test plan
 
 - **Automated:** `server/src/routes/failure-taxonomy.test.ts` feeds real captured strings (XTTS tensor error, CUDA device-side assert, a 429 quota body, `ECONNREFUSED`, `ENOSPC`, the synth-timeout message, an unknown string) and asserts exact `code`, a jargon-free `userMessage`, a non-empty `remediation`, and the legacy `fatal`. `generation-error.test.ts` stays green (asserts `errorReason === userMessage`). A `generation-stream-runner` test asserts a `chapter_failed` tick carrying `remediation` surfaces it on the chapter row + toast.
 - **Manual:** force a known failure (stop the sidecar mid-run → `sidecar-unreachable`; oversubscribe VRAM → `vram-spill`) and confirm the Generate view shows the friendly message + a "What to do:" line, and the toast matches.
+- **CUDA copy:** `failure-remediations.test.ts` pins restart/healthy-pill/log guidance and rejects the unsupported control-character diagnosis and ten-second guarantee. `failure-taxonomy.test.ts` preserves the fatal CUDA classification.
 
 ## Ship notes
 

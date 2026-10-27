@@ -75,6 +75,21 @@ function makeRunner(): { store: ReturnType<typeof makeStore>; runner: StreamRunn
 }
 
 describe('generation-stream-runner (queue-sole concurrency)', () => {
+  it('passes an observation-only resume through to the API', () => {
+    const { runner } = makeRunner();
+    runner.open('b1', 'kokoro-v1', { chapterIds: [2] }, {
+      chapterId: 2,
+      queueEntryId: 'persisted-entry',
+      resume: true,
+    });
+    expect(streamGenerationMock.mock.calls[0][0]).toMatchObject({
+      chapterIds: [2],
+      queueEntryId: 'persisted-entry',
+      resume: true,
+    });
+    expect(streamGenerationMock.mock.calls[0][0].force).toBeUndefined();
+  });
+
   it('open() seeds the per-stream snapshot (keyed by composite key) from the viewed book’s rows', () => {
     const { store, runner } = makeRunner();
     store.dispatch(chaptersSlice.actions.setCurrentBookId('b1'));

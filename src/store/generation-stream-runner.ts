@@ -42,6 +42,8 @@ export interface StreamSpec {
 }
 
 export interface StreamOpenOpts {
+  /** Observe a persisted live attempt after reload; never start synthesis. */
+  resume?: boolean;
   /** Queue entry this stream fulfils. Threaded to the server so per-chapter
       ticks correlate to the right queue row when entries from different
       books interleave. */
@@ -279,6 +281,7 @@ export function createStreamRunner(store: StreamRunnerStore): StreamRunner {
       modelKey,
       chapterIds: spec?.chapterIds,
       force: spec?.force,
+      ...(opts.resume ? { resume: true } : {}),
       ...(opts.queueEntryId ? { queueEntryId: opts.queueEntryId } : {}),
       ...(opts.fallbackConfirmed ? { fallbackConfirmed: true } : {}),
       /* The mock implementation reads live chapter state via this callback;

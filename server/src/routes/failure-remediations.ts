@@ -143,13 +143,13 @@ export const FAILURE_REMEDIATIONS = {
   },
   'cuda-poisoned': {
     userMessage:
-      'Local voice engine hit a CUDA error and is auto-restarting (the CUDA context is corrupted ' +
-      'process-wide; only a fresh Python process recovers). Wait ~10 seconds for the voice engine pill ' +
-      'to go green again, then click Retry on this chapter. The offending text is in the voice engine ' +
-      'log (text_preview=) — usually a stray zero-width or control char in the manuscript.',
+      'Local voice engine hit a CUDA error and needs a fresh process to recover. Restart the voice ' +
+      'engine if it has not restarted, wait for its pill to go green, then click Retry on this ' +
+      'chapter. Check the voice engine log for the original error if it happens again.',
     remediation:
-      'Wait ~10 seconds for the voice engine to respawn (the pill goes green), then click Retry. If it ' +
-      'recurs on the same chapter, check the voice engine log text_preview= for a stray control char.',
+      'Restart the voice engine if needed and wait for its pill to go green, then click Retry. ' +
+      'If it recurs, check the voice engine log for the original error; possible causes include ' +
+      'the model, input, available memory, or GPU driver.',
   },
   'gpu-acceleration-unavailable': {
     userMessage:

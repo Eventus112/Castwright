@@ -7,17 +7,10 @@
      audio/<slug>.segments.json   — per-group timing metadata
    and updates the chapter's `duration` in .audiobook/state.json.
 
-   Resumability: a chapter is "complete" iff an `.mp3` exists for it on
-   disk. Partial chapters never land on disk because we hold the PCM in
-   memory until the whole chapter is done.
-
-   Pause semantics: when the client closes the SSE (Pause button), we DO NOT
-   abort the chapter in flight — it finishes its remaining groups and persists
-   its MP3. The outer loop checks `pauseRequested` between chapters and
-   bails. Resume = new POST, picks up from disk state (the just-finished
-   chapter has an MP3 now, so the loop starts on the next one). At connect
-   time we replay `chapter_complete` ticks for every already-done chapter so
-   a reconnecting client reconciles state in one round-trip. */
+   Reconnects use resume:true to attach to the same live attempt without
+   starting synthesis. Existing audio cannot prove a forced regeneration
+   finished. A queue job survives its last subscriber for 30 seconds; explicit
+   pause aborts immediately. Legacy non-resume requests retain disk catch-up. */
 
 import { Router } from 'express';
 import type { Request, Response } from '../http.js';
@@ -355,7 +348,8 @@ async function triggerSidecarRecycle(): Promise<void> {
    Pause semantics live on POST /pause now, not on SSE close. SSE close
    only unsubscribes the closing observer; a job keeps running until either
    (a) it finishes, (b) /pause is called (aborts every job for the book), or
-   (c) a regen POST (chapterIds + force) displaces THIS chapter's job. */
+   (c) a regen POST displaces THIS chapter's job, or (d) the queue job's
+   last subscriber stays disconnected for the 30-second grace period. */
 interface Subscriber {
   send: (ev: unknown) => void;
   res: Response;
@@ -365,6 +359,10 @@ interface RunningJob {
   controller: AbortController;
   subscribers: Set<Subscriber>;
   bookId: string;
+  modelKey: TtsModelKey;
+  requestedIds: number[] | null;
+  completedBeforeRun: number[];
+  orphanTimer?: ReturnType<typeof setTimeout>;
   /** The chapter this job renders. Under the queue-sole-concurrency model
       (one queue worker = one chapter) every dispatcher POST carries exactly
       one chapter, so a job's identity is `${bookId}::${chapterId}`. The
@@ -524,6 +522,7 @@ async function markQueueEntryAwaitingConfirmOnDisk(
 }
 
 function registerJob(key: string, job: RunningJob): void {
+  job.controller.signal.addEventListener('abort', () => clearOrphanTimer(job), { once: true });
   /* side-11 investigation (2026-07-06) — an overnight generation was found
      asleep for ~7h after Windows entered Modern Standby mid-run. Hold the
      system awake for as long as ANYTHING is in flight, across every book —
@@ -549,6 +548,7 @@ function registerJob(key: string, job: RunningJob): void {
 }
 
 function deregisterJob(key: string, job: RunningJob): void {
+  clearOrphanTimer(job);
   /* Only drop the primary entry if it still points at THIS job — a newer
      regen of the same chapter may have already displaced us. */
   if (inFlightByChapter.get(key) === job) {
@@ -577,6 +577,9 @@ export function __registerFakeJobForTest(
     controller: new AbortController(),
     subscribers: new Set(subscribers),
     bookId,
+    modelKey: 'kokoro-v1',
+    requestedIds: null,
+    completedBeforeRun: [],
     chapterId: null,
     queueEntryId: null,
     fallbackConfirmed: false,
@@ -643,7 +646,7 @@ function broadcast(job: RunningJob, ev: unknown): void {
       sub.send(enriched);
     } catch {
       /* A subscriber whose socket already died is harmless to skip — the
-         cleanup hook on req.on('close') will drop it from the Set on its
+         cleanup hook on res.on('close') will drop it from the Set on its
          own tick. We don't want one dead socket to abort the broadcast
          for the rest of the room. */
     }
@@ -679,6 +682,7 @@ function broadcastToBook(bookId: string, ev: unknown): void {
 }
 
 function endAllSubscribers(job: RunningJob, finalEv?: unknown): void {
+  clearOrphanTimer(job);
   for (const sub of job.subscribers) {
     if (finalEv) {
       try {
@@ -696,10 +700,77 @@ function endAllSubscribers(job: RunningJob, finalEv?: unknown): void {
   job.subscribers.clear();
 }
 
+const ORPHAN_GRACE_MS = 30_000;
+
+function clearOrphanTimer(job: RunningJob): void {
+  if (job.orphanTimer != null) clearTimeout(job.orphanTimer);
+  job.orphanTimer = undefined;
+}
+
+function subscribe(job: RunningJob, send: Subscriber['send'], res: Response): void {
+  clearOrphanTimer(job);
+  const subscriber = { send, res };
+  job.subscribers.add(subscriber);
+  res.once('close', () => {
+    job.subscribers.delete(subscriber);
+    const isOrphan = () =>
+      job.subscribers.size === 0 &&
+      !job.controller.signal.aborted &&
+      inFlightByChapter.get(chapterKey(job.bookId, job.chapterId)) === job;
+    if (job.queueEntryId == null || !isOrphan()) return;
+    clearOrphanTimer(job);
+    job.orphanTimer = setTimeout(() => {
+      job.orphanTimer = undefined;
+      /* Recheck inside the queue serializer too: a subscriber, completion,
+         displacement or pause can win while another queue write is pending. */
+      void serializeQueueMutation(async () => {
+        if (!isOrphan()) return;
+        try {
+          const before = await readQueueFile(queueJsonPath());
+          if (!isOrphan()) return;
+          job.controller.abort();
+          const after = resetEntryToQueued(before, job.queueEntryId!);
+          if (after !== before) await writeQueueFile(queueJsonPath(), after);
+        } catch (err) {
+          if (isOrphan()) job.controller.abort();
+          console.warn(
+            `[generation] orphan-recovery: failed to reset queue entry ${job.queueEntryId} to queued: ${(err as Error).message}`,
+          );
+        }
+      });
+    }, ORPHAN_GRACE_MS);
+    job.orphanTimer.unref?.();
+  });
+}
+
+function replayProgress(job: RunningJob, send: Subscriber['send']): void {
+  const tick =
+    job.lastProgressTick ??
+    (job.currentChapterId != null
+      ? {
+          chapterId: job.currentChapterId,
+          characterId: null,
+          progress: 0.01,
+          currentLine: 0,
+          totalLines: 0,
+        }
+      : null);
+  if (tick)
+    send({
+      type: 'progress',
+      ...tick,
+      runDone: job.runDoneBase + job.completedThisRun.size,
+      runTotal: job.runTotal,
+      runInProgress: job.runInProgress.size,
+      ...(job.queueEntryId ? { queueEntryId: job.queueEntryId } : {}),
+    });
+}
+
 interface GenerationRequestBody {
   modelKey?: unknown;
   chapterIds?: unknown;
   force?: unknown;
+  resume?: unknown;
   /** Plan 102 — workspace queue entry id this POST is fulfilling. Optional
       for back-compat (existing callers don't set it; pre-plan-102 servers
       ignored the field). When present, the server stores it on the
@@ -746,6 +817,40 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
      and stamped on every broadcast tick + the resume_from ack. */
   const queueEntryId = typeof body.queueEntryId === 'string' ? body.queueEntryId : null;
   const fallbackConfirmed = body.fallbackConfirmed === true;
+
+  /* A reconnect is subscribe-only and runs before provider/cache/preload and
+     displacement. Never mistake an older MP3 for this attempt's completion. */
+  if (body.resume === true) {
+    const existing = [...(inFlightByBook.get(bookId) ?? [])].find(
+      (job) =>
+        !job.controller.signal.aborted &&
+        inFlightByChapter.get(chapterKey(bookId, job.chapterId)) === job &&
+        job.modelKey === modelKey &&
+        JSON.stringify(job.requestedIds) === JSON.stringify(requestedIds) &&
+        (queueEntryId == null || job.queueEntryId === queueEntryId),
+    );
+    if (!existing) {
+      const targets = requestedIds?.length ? requestedIds : [undefined];
+      for (const chapterId of targets)
+        send({
+          type: 'chapter_failed',
+          ...(chapterId != null ? { chapterId } : {}),
+          ...(queueEntryId ? { queueEntryId } : {}),
+          errorReason:
+            'Generation was interrupted and its live attempt is unavailable. Click Retry to start this chapter again.',
+        });
+      send({ type: 'idle' });
+      return res.end();
+    }
+    subscribe(existing, send, res);
+    send({
+      type: 'resume_from',
+      ...(existing.queueEntryId ? { queueEntryId: existing.queueEntryId } : {}),
+      resumeFromCompletedChapterIds: [...existing.completedBeforeRun, ...existing.completedThisRun],
+    });
+    replayProgress(existing, send);
+    return;
+  }
 
   let provider;
   try {
@@ -1197,24 +1302,8 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
     );
     if (liveJobs.length > 0) {
       for (const existing of liveJobs) {
-        const subscriber: Subscriber = { send, res };
-        existing.subscribers.add(subscriber);
-        req.on('close', () => existing.subscribers.delete(subscriber));
-        if (existing.lastProgressTick) {
-          send({ type: 'progress', ...existing.lastProgressTick });
-        } else if (existing.currentChapterId != null) {
-          /* Sub-second window where the loop just entered a chapter but hasn't
-             emitted a group-boundary tick yet. Send a minimal in-progress
-             marker so the row still flips out of "queued". */
-          send({
-            type: 'progress',
-            chapterId: existing.currentChapterId,
-            characterId: null,
-            progress: 0.01,
-            currentLine: 0,
-            totalLines: 0,
-          });
-        }
+        subscribe(existing, send, res);
+        replayProgress(existing, send);
       }
       /* Keep `res` open. Each subscribed job ends this response via
          endAllSubscribers() when it drains or is paused; the FIRST job to
@@ -1245,8 +1334,11 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
   ).length;
   const job: RunningJob = {
     controller,
-    subscribers: new Set([{ send, res }]),
+    subscribers: new Set(),
     bookId,
+    modelKey,
+    requestedIds,
+    completedBeforeRun: onDiskCompleted,
     chapterId: jobChapterId,
     queueEntryId,
     fallbackConfirmed,
@@ -1260,65 +1352,7 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
   };
   registerJob(key, job);
 
-  /* SSE close on the starter connection is just an unsubscribe — the job
-     keeps running for any other observers. If the starter was the only
-     subscriber, the loop generates audio to disk silently; the next
-     subscriber to attach picks up via the catch-up replay. */
-  /* `res.on('close')` (not `req`) is the reliable client-gone signal: once
-     express.json() has consumed the request body the `req` stream is already
-     ended, so `req.on('close')` can miss a mid-stream disconnect. The response
-     stays open for the SSE, so its `close` is what actually fires when the
-     socket tears down. */
-  res.on('close', () => {
-    for (const sub of job.subscribers) {
-      if (sub.res === res) {
-        job.subscribers.delete(sub);
-        break;
-      }
-    }
-
-    /* srv-12 — orphan recovery. On success the frontend POSTs /complete BEFORE
-       the SSE closes, so the entry is already done-pruned (or marked failed) by
-       now. An entry STILL `in_progress` at last-subscriber-close is therefore
-       abnormal: the watcher vanished mid-run (tab closed / network drop) with no
-       one to drive the chapter to /complete. Reset it `in_progress`→`queued` so
-       the dispatcher re-claims it on the next boot/snapshot, and abort the
-       now-unwatched synthesis to free the GPU.
-
-       Gated three ways so we only touch genuine orphans:
-         - `job.subscribers.size === 0` — this was the LAST subscriber.
-         - `job.queueEntryId` is set — a queue-driven run (not a legacy caller).
-         - the job is still REGISTERED (`inFlightByChapter.get(key) === job`) —
-           i.e. the loop hasn't reached deregisterJob, so the run hasn't drained
-           normally. A completed/displaced job is already deregistered, so we
-           skip it and never resurrect a done entry.
-       `resetEntryToQueued` is itself a no-op for a missing / non-in_progress id,
-       so a race against the frontend-owned lifecycle can't flip a done/failed
-       entry back to queued. */
-    if (
-      job.subscribers.size === 0 &&
-      job.queueEntryId != null &&
-      inFlightByChapter.get(key) === job
-    ) {
-      const orphanEntryId = job.queueEntryId;
-      /* srv-16 — through the shared serializer so this reset can't race a
-         concurrent per-chapter completion (read-modify-write on one file). */
-      void serializeQueueMutation(async () => {
-        try {
-          const before = await readQueueFile(queueJsonPath());
-          const after = resetEntryToQueued(before, orphanEntryId);
-          if (after !== before) await writeQueueFile(queueJsonPath(), after);
-        } catch (err) {
-          console.warn(
-            `[generation] orphan-recovery: failed to reset queue entry ${orphanEntryId} to queued: ${
-              (err as Error).message
-            }`,
-          );
-        }
-      });
-      if (!job.controller.signal.aborted) job.controller.abort();
-    }
-  });
+  subscribe(job, send, res);
 
   /* Cascade detector — if the same non-fatal reason fails two chapters in
      a row (only reachable on the back-compat `*` job that walks multiple

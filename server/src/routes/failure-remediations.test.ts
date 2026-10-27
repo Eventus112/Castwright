@@ -23,3 +23,16 @@ describe('FAILURE_REMEDIATIONS.cloned-voice-broken (#1979)', () => {
     expect(remediation).toMatch(/reassign the character/i);
   });
 });
+
+describe('FAILURE_REMEDIATIONS.cuda-poisoned', () => {
+  it('asks for a healthy restarted engine and the original log, without guessing at text or restart timing', () => {
+    const { userMessage, remediation } = FAILURE_REMEDIATIONS['cuda-poisoned'];
+    for (const copy of [userMessage, remediation]) {
+      expect(copy).toMatch(/restart/i);
+      expect(copy).toMatch(/pill.*green|green.*pill/i);
+      expect(copy).toMatch(/log/i);
+      expect(copy).not.toMatch(/10 seconds|auto-restart|usually|zero-width|control char/i);
+    }
+    expect(remediation).toMatch(/model.*input.*memory.*driver/i);
+  });
+});
