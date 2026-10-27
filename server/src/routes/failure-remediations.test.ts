@@ -36,3 +36,20 @@ describe('FAILURE_REMEDIATIONS.cuda-poisoned', () => {
     expect(remediation).toMatch(/model.*input.*memory.*driver/i);
   });
 });
+
+describe('FAILURE_REMEDIATIONS.vram-spill', () => {
+  it('reports VRAM exhaustion without assuming multiple resident models', () => {
+    const { userMessage } = FAILURE_REMEDIATIONS['vram-spill'];
+    expect(userMessage).toMatch(/GPU.*ran out.*memory.*VRAM/i);
+    expect(userMessage).not.toMatch(/too many models/i);
+  });
+
+  it('gives worker, batch-size, and unused-model actions before retrying', () => {
+    const { remediation } = FAILURE_REMEDIATIONS['vram-spill'];
+    expect(remediation).toMatch(/reduc.*generation workers/i);
+    expect(remediation).toMatch(/batch size/i);
+    expect(remediation).toMatch(/unload.*unused models/i);
+    expect(remediation).toMatch(/retry/i);
+    expect(remediation).not.toMatch(/\b\d+\s*GB\b/i);
+  });
+});

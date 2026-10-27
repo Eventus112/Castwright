@@ -41,10 +41,10 @@ export const FAILURE_REMEDIATIONS = {
   },
   'vram-spill': {
     userMessage:
-      'The GPU ran out of video memory (VRAM) mid-render — too many models were resident at once.',
+      'The GPU ran out of video memory (VRAM) mid-render.',
     remediation:
-      'Unload any models you are not generating with (the analyzer Ollama, or a second voice engine) ' +
-      'from the model pills, then retry. On an 8 GB card keep only one heavy voice engine loaded.',
+      'Reduce generation workers or batch size to lower peak GPU memory use. ' +
+      'Unload unused models from the model pills, then retry.',
   },
   oom: {
     userMessage:
