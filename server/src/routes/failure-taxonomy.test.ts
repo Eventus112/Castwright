@@ -112,6 +112,18 @@ describe('classifyFailure', () => {
     expect(out.remediation.length).toBeGreaterThan(0);
   });
 
+  it('preserves the OOM cause in a curated poisoned 503 payload', () => {
+    const out = classifyFailure(
+      new Error(
+        'Local TTS sidecar returned 503: {"detail":"CUDA out of memory.","poisoned":true}',
+      ),
+      'qwen',
+    );
+    expect(out.code).toBe('vram-spill');
+    expect(out.fatal).toBe(true);
+    expect(out.userMessage).toMatch(/memory|vram/i);
+  });
+
   it('classifies a host OOM kill (exit 137 / "killed") as oom, fatal', () => {
     const out = classifyFailure(
       new Error('TTS sidecar process exited unexpectedly: killed (exit code 137)'),
