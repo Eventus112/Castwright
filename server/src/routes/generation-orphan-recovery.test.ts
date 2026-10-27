@@ -12,6 +12,9 @@ type SynthArgs = { signal: AbortSignal; onGroupComplete: (tick: object) => void 
 let synthesiseImpl: (args: SynthArgs) => Promise<unknown>;
 const synth = vi.fn((args: SynthArgs) => synthesiseImpl(args));
 const selectProvider = vi.fn(() => ({ synthesize: vi.fn() }));
+const hydrateCast = vi.fn(
+  async (characters: import('../tts/synthesise-chapter.js').CastCharacter[]) => characters,
+);
 let onQueueWrite: (() => void) | undefined;
 vi.mock('../tts/synthesise-chapter.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../tts/synthesise-chapter.js')>()),
@@ -20,6 +23,10 @@ vi.mock('../tts/synthesise-chapter.js', async (importOriginal) => ({
 vi.mock('../tts/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../tts/index.js')>()),
   selectTtsProvider: () => selectProvider(),
+}));
+vi.mock('../tts/hydrate-reused-voice-workspace.js', () => ({
+  hydrateCastReusedVoices: (characters: import('../tts/synthesise-chapter.js').CastCharacter[]) =>
+    hydrateCast(characters),
 }));
 vi.mock('../tts/ensure-sidecar-loaded.js', () => ({
   ensureSidecarEngineReady: vi.fn(async () => undefined),
@@ -53,6 +60,8 @@ function deferred<T = void>() {
 }
 class SseResponse extends EventEmitter {
   ticks: Record<string, unknown>[] = [];
+  destroyed = false;
+  writableEnded = false;
   setHeader() {}
   flushHeaders() {}
   write(frame: string) {
@@ -60,6 +69,7 @@ class SseResponse extends EventEmitter {
     return true;
   }
   end() {
+    this.writableEnded = true;
     this.emit('close');
     return this;
   }
@@ -75,16 +85,16 @@ let bookDir: string;
 let bookId: string;
 let queuePath: string;
 let generationRouter: import('express').Router;
+let isGenerationActive: typeof import('./generation.js').isGenerationActive;
 let readQueueFile: typeof import('../workspace/queue-migrate.js').readQueueFile;
 let writeQueueFile: typeof import('../workspace/queue-migrate.js').writeQueueFile;
 let pending: Promise<unknown>[] = [];
 let nextSynth = deferred<SynthArgs>();
 const ENTRY_ID = 'orphan-entry-1';
 const modelKey = 'gemini-2.5-flash';
-function dispatch(body: object, path = '/:bookId/generation') {
+function dispatch(body: object, path = '/:bookId/generation', res = new SseResponse()) {
   const layer = generationRouter.stack.find((entry) => entry.route?.path === path)!;
   const req = Object.assign(new EventEmitter(), { params: { bookId }, body });
-  const res = new SseResponse();
   const done = Promise.resolve(
     layer.route!.stack[0].handle(req as unknown as Request, res as unknown as Response, vi.fn()),
   );
@@ -121,7 +131,7 @@ beforeAll(async () => {
   workspaceRoot = await mkdtemp(join(tmpdir(), 'generation-reconnect-'));
   process.env.WORKSPACE_DIR = workspaceRoot;
   process.env.GEN_WORKERS = '1';
-  ({ generationRouter } = await import('./generation.js'));
+  ({ generationRouter, isGenerationActive } = await import('./generation.js'));
   const paths = await import('../workspace/paths.js');
   ({ readQueueFile, writeQueueFile } = await import('../workspace/queue-migrate.js'));
   const cache = await import('../store/analysis-cache.js');
@@ -157,6 +167,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   synth.mockClear();
   selectProvider.mockClear();
+  hydrateCast.mockReset();
+  hydrateCast.mockImplementation(async (characters) => characters);
   pending = [];
   onQueueWrite = undefined;
   await rm(join(bookDir, 'audio', 'chapter-1.mp3'), { force: true });
@@ -188,6 +200,142 @@ afterAll(async () => {
 });
 
 describe('generation reconnect and orphan grace', () => {
+  it.each(['destroyed', 'writableEnded'] as const)(
+    'does not subscribe an already closed resume response or clear its orphan grace: %s',
+    async (closedFlag) => {
+      const starter = await open();
+      const signal = synth.mock.calls[0][0].signal;
+      starter.res.emit('close');
+      expect(vi.getTimerCount()).toBe(1);
+      const res = new SseResponse();
+      res[closedFlag] = true;
+      res.emit('close');
+      const resumed = dispatch(
+        { modelKey, chapterIds: [1], resume: true, queueEntryId: ENTRY_ID },
+        undefined,
+        res,
+      );
+      await resumed.done;
+      expect(vi.getTimerCount()).toBe(1);
+      expect(synth).toHaveBeenCalledTimes(1);
+      expect(signal.aborted).toBe(false);
+      expect(res.ticks).toEqual([]);
+    },
+  );
+  it.each(['destroyed', 'writableEnded'] as const)(
+    'never starts for a response already closed before route entry: %s',
+    async (closedFlag) => {
+      const res = new SseResponse();
+      res[closedFlag] = true;
+      res.emit('close');
+      nextSynth = deferred<SynthArgs>();
+      const stream = dispatch(
+        { modelKey, chapterIds: [1], force: true, queueEntryId: ENTRY_ID },
+        undefined,
+        res,
+      );
+      await Promise.race([stream.done, nextSynth.promise]);
+      expect(synth).not.toHaveBeenCalled();
+      await stream.done;
+      expect(isGenerationActive(bookId)).toBe(false);
+      expect(await entryStatus()).toBe('queued');
+      expect(res.ticks).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+  it.each(['in_progress', 'failed', 'removed'] as const)(
+    'never starts after a preflight disconnect and preserves a %s queue entry lifecycle',
+    async (status) => {
+      const entered = deferred();
+      const release = deferred();
+      hydrateCast.mockImplementationOnce(async (characters) => {
+        entered.resolve();
+        await release.promise;
+        return characters;
+      });
+      const stream = dispatch({ modelKey, chapterIds: [1], force: true, queueEntryId: ENTRY_ID });
+      await entered.promise;
+      stream.res.emit('close');
+      const resumed = await open({ resume: true, force: undefined });
+      expect(resumed.res.ticks.map((t) => t.type)).toEqual(['chapter_failed', 'idle']);
+      if (status !== 'in_progress') {
+        const before = await readQueueFile(queuePath);
+        await writeQueueFile(queuePath, {
+          ...before,
+          entries:
+            status === 'removed'
+              ? []
+              : before.entries.map((entry) => ({
+                  ...entry,
+                  status: 'failed',
+                  errorReason: 'Live attempt unavailable. Click Retry.',
+                })),
+        });
+      }
+      release.resolve();
+      await Promise.race([stream.done, nextSynth.promise]);
+      expect(synth).not.toHaveBeenCalled();
+      await stream.done;
+      expect(isGenerationActive(bookId)).toBe(false);
+      expect(await entryStatus()).toBe(
+        status === 'in_progress' ? 'queued' : status === 'removed' ? undefined : 'failed',
+      );
+      if (status === 'failed')
+        expect((await readQueueFile(queuePath)).entries[0].errorReason).toBe(
+          'Live attempt unavailable. Click Retry.',
+        );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+  it.each([{ force: true }, { chapterIds: undefined, force: undefined }])(
+    'does not attach or displace target or sibling jobs after a preflight disconnect: %j',
+    async (body) => {
+      const before = await readQueueFile(queuePath);
+      await writeQueueFile(queuePath, {
+        ...before,
+        entries: [
+          ...before.entries,
+          { ...before.entries[0], id: 'entry-two', chapterId: 2, order: 1 },
+        ],
+      });
+      const target = await open();
+      const sibling = await open({ chapterIds: [2], queueEntryId: 'entry-two' });
+      const targetSignal = synth.mock.calls[0][0].signal;
+      const siblingSignal = synth.mock.calls[1][0].signal;
+      const entered = deferred();
+      const release = deferred();
+      hydrateCast.mockImplementationOnce(async (characters) => {
+        entered.resolve();
+        await release.promise;
+        return characters;
+      });
+      nextSynth = deferred<SynthArgs>();
+      const stream = dispatch({ modelKey, chapterIds: [1], queueEntryId: ENTRY_ID, ...body });
+      await entered.promise;
+      stream.res.emit('close');
+      const runningQueue = await readQueueFile(queuePath);
+      release.resolve();
+      await Promise.race([stream.done, nextSynth.promise]);
+      expect(synth).toHaveBeenCalledTimes(2);
+      await stream.done;
+      expect(targetSignal.aborted).toBe(false);
+      expect(siblingSignal.aborted).toBe(false);
+      expect(await readQueueFile(queuePath)).toEqual(runningQueue);
+      const queued = deferred();
+      onQueueWrite = () => {
+        void readQueueFile(queuePath).then((queue) => {
+          if (queue.entries.every((entry) => entry.status === 'queued')) queued.resolve();
+        });
+      };
+      target.res.emit('close');
+      sibling.res.emit('close');
+      expect(vi.getTimerCount()).toBe(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await queued.promise;
+      expect(targetSignal.aborted).toBe(true);
+      expect(siblingSignal.aborted).toBe(true);
+    },
+  );
   it('keeps a forced run alive through a drop and scoped resume, preserving progress with one synth', async () => {
     const starter = await open();
     const signal = synth.mock.calls[0][0].signal;

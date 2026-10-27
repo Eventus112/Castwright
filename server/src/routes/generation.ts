@@ -785,6 +785,10 @@ interface GenerationRequestBody {
 }
 
 generationRouter.post('/:bookId/generation', async (req: Request, res: Response) => {
+  let responseClosed = Boolean(res.destroyed || res.writableEnded);
+  res.once('close', () => {
+    responseClosed = true;
+  });
   const { bookId } = req.params;
   const body = (req.body ?? {}) as GenerationRequestBody;
 
@@ -795,6 +799,7 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
   res.flushHeaders();
 
   const send = (payload: unknown) => {
+    if (responseClosed) return;
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
@@ -821,6 +826,7 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
   /* A reconnect is subscribe-only and runs before provider/cache/preload and
      displacement. Never mistake an older MP3 for this attempt's completion. */
   if (body.resume === true) {
+    if (responseClosed) return;
     const existing = [...(inFlightByBook.get(bookId) ?? [])].find(
       (job) =>
         !job.controller.signal.aborted &&
@@ -1174,6 +1180,34 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
     await reconcileResidentQwenTiers(usedQwenTiers).catch((e) =>
       console.warn('[generation] tier reconcile skipped:', (e as Error).message),
     );
+  }
+
+  /* A disconnect during awaited preflight has no subscriber to remove yet.
+     Never attach the dead response or displace/start work on its behalf.
+     Recover only an unowned in_progress row; a live attempt or a frontend
+     failure/removal must keep its own lifecycle. No await follows this gate
+     before the subscription/displacement/registration below. */
+  if (responseClosed) {
+    if (queueEntryId != null) {
+      const hasLiveOwner = () =>
+        [...inFlightByChapter.values()].some(
+          (job) => job.queueEntryId === queueEntryId && !job.controller.signal.aborted,
+        );
+      await serializeQueueMutation(async () => {
+        if (hasLiveOwner()) return;
+        try {
+          const before = await readQueueFile(queueJsonPath());
+          if (hasLiveOwner()) return;
+          const after = resetEntryToQueued(before, queueEntryId);
+          if (after !== before) await writeQueueFile(queueJsonPath(), after);
+        } catch (err) {
+          console.warn(
+            `[generation] preflight disconnect: failed to reset queue entry ${queueEntryId} to queued: ${(err as Error).message}`,
+          );
+        }
+      });
+    }
+    return;
   }
 
   /* srv-16 — if this queue-driven POST's sole target chapter already has audio
