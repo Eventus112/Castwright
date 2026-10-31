@@ -342,6 +342,51 @@ describe('generation reconnect and orphan grace', () => {
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+  it.each(['failed', 'done'] as const)(
+    'preserves frontend %s completion racing with orphan expiry',
+    async (outcome) => {
+      const stream = await open();
+      stream.res.emit('close');
+      const releaseWrite = deferred();
+      const written = deferred();
+      let cleanupWriteStarted = false;
+      /* Hold a stale orphan cleanup write, if one exists, until the real
+         frontend completion route has persisted its failure/removal. */
+      beforeQueueWrite = async () => {
+        beforeQueueWrite = undefined;
+        cleanupWriteStarted = true;
+        await releaseWrite.promise;
+      };
+      await vi.advanceTimersByTimeAsync(30_000);
+      await stream.done;
+      beforeQueueWrite = undefined;
+      const resumed = await open({ resume: true, force: undefined });
+      expect(resumed.res.ticks.map((tick) => tick.type)).toEqual(['chapter_failed', 'idle']);
+      const { queueRouter } = await import('./queue.js');
+      const route = queueRouter.stack.find((entry) => entry.route?.path === '/:entryId/complete')!;
+      const errorReason = 'Live attempt unavailable. Click Retry.';
+      const req = { params: { entryId: ENTRY_ID }, body: { outcome, errorReason } };
+      try {
+        await route.route!.stack[0].handle(
+          req as unknown as Request,
+          new SseResponse() as unknown as Response,
+          vi.fn(),
+        );
+        expect(await entryStatus()).toBe(outcome === 'failed' ? 'failed' : undefined);
+      } finally {
+        onQueueWrite = () => written.resolve();
+        releaseWrite.resolve();
+      }
+      if (cleanupWriteStarted) await written.promise;
+      expect(await entryStatus()).toBe(outcome === 'failed' ? 'failed' : undefined);
+      if (outcome === 'failed')
+        expect((await readQueueFile(queuePath)).entries[0].errorReason).toBe(errorReason);
+      expect(cleanupWriteStarted).toBe(false);
+      expect(synth).toHaveBeenCalledTimes(1);
+      expect(isGenerationActive(bookId)).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
   it.each([{ force: true }, { chapterIds: undefined, force: undefined }])(
     'does not attach or displace target or sibling jobs after a preflight disconnect: %j',
     async (body) => {
@@ -376,19 +421,17 @@ describe('generation reconnect and orphan grace', () => {
       expect(targetSignal.aborted).toBe(false);
       expect(siblingSignal.aborted).toBe(false);
       expect(await readQueueFile(queuePath)).toEqual(runningQueue);
-      const queued = deferred();
-      onQueueWrite = () => {
-        void readQueueFile(queuePath).then((queue) => {
-          if (queue.entries.every((entry) => entry.status === 'queued')) queued.resolve();
-        });
-      };
+      const queueWrite = vi.fn();
+      onQueueWrite = queueWrite;
       target.res.emit('close');
       sibling.res.emit('close');
       expect(vi.getTimerCount()).toBe(2);
       await vi.advanceTimersByTimeAsync(30_000);
-      await queued.promise;
+      await Promise.all([target.done, sibling.done]);
       expect(targetSignal.aborted).toBe(true);
       expect(siblingSignal.aborted).toBe(true);
+      expect(await readQueueFile(queuePath)).toEqual(runningQueue);
+      expect(queueWrite).not.toHaveBeenCalled();
     },
   );
   it('keeps a forced run alive through a drop and scoped resume, preserving progress with one synth', async () => {
@@ -412,27 +455,50 @@ describe('generation reconnect and orphan grace', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(signal.aborted).toBe(false);
     expect(await entryStatus()).toBe('in_progress');
-    const queued = deferred();
-    onQueueWrite = () => queued.resolve();
+    const queueWrite = vi.fn();
+    onQueueWrite = queueWrite;
     resumed.res.emit('close');
     await vi.advanceTimersByTimeAsync(30_000);
-    await queued.promise;
+    await starter.done;
     expect(signal.aborted).toBe(true);
-    expect(await entryStatus()).toBe('queued');
+    expect(await entryStatus()).toBe('in_progress');
+    expect(queueWrite).not.toHaveBeenCalled();
   });
-  it('only aborts and requeues an orphan after the full 30-second grace', async () => {
+  it('only aborts an orphan after the full 30-second grace and leaves failure persistence to its observer', async () => {
     const stream = await open();
     const signal = synth.mock.calls[0][0].signal;
+    const queueBefore = await readQueueFile(queuePath);
+    const queueWrite = vi.fn();
+    onQueueWrite = queueWrite;
     stream.res.emit('close');
+    const ticksBefore = [...stream.res.ticks];
     await vi.advanceTimersByTimeAsync(29_999);
     expect(signal.aborted).toBe(false);
     expect(await entryStatus()).toBe('in_progress');
-    const queued = deferred();
-    onQueueWrite = () => queued.resolve();
     await vi.advanceTimersByTimeAsync(1);
-    await queued.promise;
+    await stream.done;
     expect(signal.aborted).toBe(true);
-    expect(await entryStatus()).toBe('queued');
+    expect(await readQueueFile(queuePath)).toEqual(queueBefore);
+    expect(queueWrite).not.toHaveBeenCalled();
+    expect(stream.res.ticks).toEqual(ticksBefore);
+    const resumed = await open({ resume: true, force: undefined });
+    expect(resumed.res.ticks.map((tick) => tick.type)).toEqual(['chapter_failed', 'idle']);
+    expect(await readQueueFile(queuePath)).toEqual(queueBefore);
+    const failure = resumed.res.ticks[0];
+    const { queueRouter } = await import('./queue.js');
+    const route = queueRouter.stack.find((entry) => entry.route?.path === '/:entryId/complete')!;
+    const req = {
+      params: { entryId: ENTRY_ID },
+      body: { outcome: 'failed', errorReason: failure.errorReason },
+    };
+    await route.route!.stack[0].handle(
+      req as unknown as Request,
+      new SseResponse() as unknown as Response,
+      vi.fn(),
+    );
+    expect(await entryStatus()).toBe('failed');
+    expect((await readQueueFile(queuePath)).entries[0].errorReason).toBe(failure.errorReason);
+    expect(synth).toHaveBeenCalledTimes(1);
   });
   it('attaches only to its own chapter and queue while a sibling keeps running', async () => {
     const own = await open();

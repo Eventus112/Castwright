@@ -23,12 +23,7 @@ import {
   stateJsonPath,
 } from '../workspace/paths.js';
 import { readQueueFile, writeQueueFile } from '../workspace/queue-migrate.js';
-import {
-  completeEntry,
-  markAwaitingConfirm,
-  resetEntryToQueued,
-  setPaused,
-} from '../workspace/queue-io.js';
+import { completeEntry, markAwaitingConfirm, setPaused } from '../workspace/queue-io.js';
 import { computeQwenKokoroFallbackSet, type QwenFallbackChar } from '../tts/qwen-fallback-set.js';
 import { preventSleep, allowSleep } from '../system/prevent-sleep.js';
 import { readJson, writeJsonAtomic } from '../workspace/state-io.js';
@@ -456,10 +451,8 @@ export function abortInFlightChapterJob(bookId: string, chapterId: number): void
   inFlightByChapter.get(chapterKey(bookId, null))?.controller.abort();
 }
 
-/* srv-16 — serialise every server-side `.queue.json` read-modify-write through
-   one promise chain. There's no file-level lock, and the server now mutates the
-   queue from two concurrent contexts (per-chapter completion below + the
-   srv-12 orphan-recovery reset), so without this two near-simultaneous chapter
+/* srv-16 — serialise this module's `.queue.json` read-modify-write through
+   one promise chain. There's no file-level lock, so two near-simultaneous chapter
    completions could each read the same snapshot and the later write would drop
    the earlier removal. The frontend `/complete` is still a backstop, so a race
    would only fall back to today's behaviour — but serialising makes it correct
@@ -499,9 +492,9 @@ async function markQueueEntryDoneOnDisk(entryId: string, chapterId: number): Pro
 /* Loud-fallback gate — park a chapter's queue entry on `awaiting_confirm` from
    the SERVER once the worker detects an undesigned-voice Qwen→Kokoro fallback,
    stamping the affected characters for the modal. Serialised through the same
-   chain as the done-flip so it can't race the srv-12 orphan-reset / srv-16
-   done-flip. Idempotent: a missing entry (already gone) or one no longer
-   in_progress is a no-op (markAwaitingConfirm guards both). */
+   chain as the srv-16 done-flip so they can't race. Idempotent: a missing entry
+   (already gone) or one no longer in_progress is a no-op (markAwaitingConfirm
+   guards both). */
 async function markQueueEntryAwaitingConfirmOnDisk(
   entryId: string,
   fallbackCharacters: QwenFallbackChar[],
@@ -721,23 +714,9 @@ function subscribe(job: RunningJob, send: Subscriber['send'], res: Response): vo
     clearOrphanTimer(job);
     job.orphanTimer = setTimeout(() => {
       job.orphanTimer = undefined;
-      /* Recheck inside the queue serializer too: a subscriber, completion,
-         displacement or pause can win while another queue write is pending. */
-      void serializeQueueMutation(async () => {
-        if (!isOrphan()) return;
-        try {
-          const before = await readQueueFile(queueJsonPath());
-          if (!isOrphan()) return;
-          job.controller.abort();
-          const after = resetEntryToQueued(before, job.queueEntryId!);
-          if (after !== before) await writeQueueFile(queueJsonPath(), after);
-        } catch (err) {
-          if (isOrphan()) job.controller.abort();
-          console.warn(
-            `[generation] orphan-recovery: failed to reset queue entry ${job.queueEntryId} to queued: ${(err as Error).message}`,
-          );
-        }
-      });
+      /* Abort without a queue write: a returning observer persists the missing
+         attempt as Failed with Retry, without racing its completion/removal. */
+      if (isOrphan()) job.controller.abort();
     }, ORPHAN_GRACE_MS);
     job.orphanTimer.unref?.();
   });
@@ -1507,9 +1486,8 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
           }
           return;
         }
-        /* Flip in_progress → awaiting_confirm FIRST (serialised, so the srv-12
-           res-close orphan-reset + srv-16 done-flip see a non-in_progress entry
-           and no-op), then broadcast + return without rendering. */
+        /* Flip in_progress → awaiting_confirm FIRST (serialised with the srv-16
+           done-flip), then broadcast + return without rendering. */
         await markQueueEntryAwaitingConfirmOnDisk(job.queueEntryId, fallbackSet);
         job.runInProgress.delete(chapter.id);
         job.currentChapterId = null;
