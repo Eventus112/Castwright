@@ -1,6 +1,7 @@
 /* Reconnects attach to the same attempt and always release the runner. */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { GenerationTick } from './types';
+import type { StreamArgs } from './api';
 
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
@@ -28,7 +29,7 @@ function sseResponse(ticks: object[]): Response {
     text: async () => '',
   } as Response;
 }
-async function start() {
+async function start(overrides: Partial<StreamArgs> = {}) {
   const { api } = await import('./api');
   const ticks: GenerationTick[] = [];
   const cancel = api.streamGeneration({
@@ -37,6 +38,7 @@ async function start() {
     chapterIds: [1],
     force: true,
     queueEntryId: 'queue-entry-xyz',
+    ...overrides,
     onTick: (tick) => ticks.push(tick),
   });
   await vi.advanceTimersByTimeAsync(0);
@@ -90,12 +92,63 @@ describe('realStreamGeneration auto-reconnect', () => {
     });
     expect(ticks.map((t) => t.type)).toEqual(['progress', 'chapter_complete', 'idle']);
   });
-  it('does not reconnect after idle', async () => {
-    fetchMock.mockResolvedValueOnce(sseResponse([{ type: 'progress' }, { type: 'idle' }]));
+  it.each([
+    ['no progress', []],
+    ['full progress', [{ type: 'progress', chapterId: 1, progress: 1 }]],
+    ['sibling completion', [{ type: 'chapter_complete', chapterId: 2 }]],
+    ['another queue entry', [{ type: 'chapter_complete', chapterId: 1, queueEntryId: 'another-entry' }]],
+  ])('fails an unfinished target before idle without reconnecting (%s)', async (_label, beforeIdle) => {
+    fetchMock.mockResolvedValueOnce(sseResponse([...beforeIdle, { type: 'idle' }]));
     const { ticks } = await start();
     await vi.runAllTimersAsync();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(ticks.map((t) => t.type)).toEqual(['progress', 'idle']);
+    expect(ticks).toEqual([
+      ...beforeIdle,
+      {
+        type: 'chapter_failed',
+        ...scoped,
+        errorReason: expect.stringMatching(/before this chapter finished.*Retry/),
+      },
+      { type: 'idle' },
+    ]);
+  });
+  it.each(['chapter_complete', 'chapter_failed', 'chapter_awaiting_fallback_confirm'] as const)(
+    'preserves a target %s followed by idle',
+    async (type) => {
+      const terminal = {
+        type,
+        ...scoped,
+        errorReason: 'Original failure',
+        remediation: 'Open cast',
+      };
+      fetchMock.mockResolvedValueOnce(sseResponse([terminal, { type: 'idle' }]));
+      const { ticks } = await start();
+      await vi.runAllTimersAsync();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(ticks).toEqual([terminal, { type: 'idle' }]);
+    },
+  );
+  it('fails only unfinished targets when idle follows a partial completion', async () => {
+    const complete = { type: 'chapter_complete', chapterId: 1 };
+    fetchMock.mockResolvedValueOnce(sseResponse([complete, { type: 'idle' }]));
+    const { ticks } = await start({ chapterIds: [1, 2] });
+    await vi.runAllTimersAsync();
+    expect(ticks).toEqual([
+      complete,
+      expect.objectContaining({
+        type: 'chapter_failed',
+        chapterId: 2,
+        queueEntryId: scoped.queueEntryId,
+      }),
+      { type: 'idle' },
+    ]);
+  });
+  it.each([undefined, []])('allows legacy idle without explicit targets (%j)', async (chapterIds) => {
+    fetchMock.mockResolvedValueOnce(sseResponse([{ type: 'idle' }]));
+    const { ticks } = await start({ chapterIds });
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ticks).toEqual([{ type: 'idle' }]);
   });
   it.each(['chapter_complete', 'chapter_failed'] as const)(
     'ends with idle after target %s without retrying or replacing the payload',

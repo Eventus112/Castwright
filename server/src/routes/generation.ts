@@ -1184,31 +1184,10 @@ generationRouter.post('/:bookId/generation', async (req: Request, res: Response)
 
   /* A disconnect during awaited preflight has no subscriber to remove yet.
      Never attach the dead response or displace/start work on its behalf.
-     Recover only an unowned in_progress row; a live attempt or a frontend
-     failure/removal must keep its own lifecycle. No await follows this gate
-     before the subscription/displacement/registration below. */
-  if (responseClosed) {
-    if (queueEntryId != null) {
-      const hasLiveOwner = () =>
-        [...inFlightByChapter.values()].some(
-          (job) => job.queueEntryId === queueEntryId && !job.controller.signal.aborted,
-        );
-      await serializeQueueMutation(async () => {
-        if (hasLiveOwner()) return;
-        try {
-          const before = await readQueueFile(queueJsonPath());
-          if (hasLiveOwner()) return;
-          const after = resetEntryToQueued(before, queueEntryId);
-          if (after !== before) await writeQueueFile(queueJsonPath(), after);
-        } catch (err) {
-          console.warn(
-            `[generation] preflight disconnect: failed to reset queue entry ${queueEntryId} to queued: ${(err as Error).message}`,
-          );
-        }
-      });
-    }
-    return;
-  }
+     Leave queue recovery to the observer/boot lifecycle so a concurrent
+     frontend failure/removal cannot be overwritten. No await follows this
+     gate before the subscription/displacement/registration below. */
+  if (responseClosed) return;
 
   /* srv-16 — if this queue-driven POST's sole target chapter already has audio
      on disk (rendered before a crash/restart, so it's excluded from

@@ -15,6 +15,7 @@ const selectProvider = vi.fn(() => ({ synthesize: vi.fn() }));
 const hydrateCast = vi.fn(
   async (characters: import('../tts/synthesise-chapter.js').CastCharacter[]) => characters,
 );
+let beforeQueueWrite: (() => Promise<void>) | undefined;
 let onQueueWrite: (() => void) | undefined;
 vi.mock('../tts/synthesise-chapter.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../tts/synthesise-chapter.js')>()),
@@ -46,6 +47,7 @@ vi.mock('../workspace/queue-migrate.js', async (importOriginal) => {
   return {
     ...actual,
     writeQueueFile: async (...args: Parameters<typeof actual.writeQueueFile>) => {
+      await beforeQueueWrite?.();
       await actual.writeQueueFile(...args);
       onQueueWrite?.();
     },
@@ -170,6 +172,7 @@ beforeEach(async () => {
   hydrateCast.mockReset();
   hydrateCast.mockImplementation(async (characters) => characters);
   pending = [];
+  beforeQueueWrite = undefined;
   onQueueWrite = undefined;
   await rm(join(bookDir, 'audio', 'chapter-1.mp3'), { force: true });
   await writeQueueFile(queuePath, {
@@ -190,6 +193,7 @@ beforeEach(async () => {
   blockSynth();
 });
 afterEach(async () => {
+  beforeQueueWrite = undefined;
   onQueueWrite = undefined;
   dispatch({}, '/:bookId/generation/pause');
   await Promise.all(pending);
@@ -229,6 +233,7 @@ describe('generation reconnect and orphan grace', () => {
       res[closedFlag] = true;
       res.emit('close');
       nextSynth = deferred<SynthArgs>();
+      const queueBefore = await readQueueFile(queuePath);
       const stream = dispatch(
         { modelKey, chapterIds: [1], force: true, queueEntryId: ENTRY_ID },
         undefined,
@@ -238,7 +243,7 @@ describe('generation reconnect and orphan grace', () => {
       expect(synth).not.toHaveBeenCalled();
       await stream.done;
       expect(isGenerationActive(bookId)).toBe(false);
-      expect(await entryStatus()).toBe('queued');
+      expect(await readQueueFile(queuePath)).toEqual(queueBefore);
       expect(res.ticks).toEqual([]);
       expect(vi.getTimerCount()).toBe(0);
     },
@@ -272,18 +277,68 @@ describe('generation reconnect and orphan grace', () => {
                 })),
         });
       }
+      const queueBefore = await readQueueFile(queuePath);
       release.resolve();
       await Promise.race([stream.done, nextSynth.promise]);
       expect(synth).not.toHaveBeenCalled();
       await stream.done;
       expect(isGenerationActive(bookId)).toBe(false);
-      expect(await entryStatus()).toBe(
-        status === 'in_progress' ? 'queued' : status === 'removed' ? undefined : 'failed',
-      );
+      expect(await readQueueFile(queuePath)).toEqual(queueBefore);
       if (status === 'failed')
         expect((await readQueueFile(queuePath)).entries[0].errorReason).toBe(
           'Live attempt unavailable. Click Retry.',
         );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+  it.each(['failed', 'done'] as const)(
+    'preserves frontend %s completion racing with disconnected preflight',
+    async (outcome) => {
+      const entered = deferred();
+      const releasePreflight = deferred();
+      const writeEntered = deferred();
+      const releaseWrite = deferred();
+      hydrateCast.mockImplementationOnce(async (characters) => {
+        entered.resolve();
+        await releasePreflight.promise;
+        return characters;
+      });
+      const stream = dispatch({ modelKey, chapterIds: [1], force: true, queueEntryId: ENTRY_ID });
+      await entered.promise;
+      stream.res.emit('close');
+      const resumed = await open({ resume: true, force: undefined });
+      expect(resumed.res.ticks.map((tick) => tick.type)).toEqual(['chapter_failed', 'idle']);
+      /* Hold any stale cleanup snapshot until the real frontend completion
+         route has persisted its failure/removal. A write-free preflight
+         returns directly instead. */
+      beforeQueueWrite = async () => {
+        beforeQueueWrite = undefined;
+        writeEntered.resolve();
+        await releaseWrite.promise;
+      };
+      releasePreflight.resolve();
+      await Promise.race([stream.done, writeEntered.promise]);
+      beforeQueueWrite = undefined;
+      const { queueRouter } = await import('./queue.js');
+      const route = queueRouter.stack.find((entry) => entry.route?.path === '/:entryId/complete')!;
+      const errorReason = 'Live attempt unavailable. Click Retry.';
+      const req = { params: { entryId: ENTRY_ID }, body: { outcome, errorReason } };
+      try {
+        await route.route!.stack[0].handle(
+          req as unknown as Request,
+          new SseResponse() as unknown as Response,
+          vi.fn(),
+        );
+        expect(await entryStatus()).toBe(outcome === 'failed' ? 'failed' : undefined);
+      } finally {
+        releaseWrite.resolve();
+      }
+      await stream.done;
+      expect(await entryStatus()).toBe(outcome === 'failed' ? 'failed' : undefined);
+      if (outcome === 'failed')
+        expect((await readQueueFile(queuePath)).entries[0].errorReason).toBe(errorReason);
+      expect(synth).not.toHaveBeenCalled();
+      expect(isGenerationActive(bookId)).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
     },
   );

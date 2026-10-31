@@ -5744,7 +5744,7 @@ function realStreamGeneration({
     ...(tick.chapterId == null && chapterIds?.length === 1 ? { chapterId: chapterIds[0] } : {}),
     ...(tick.queueEntryId == null && queueEntryId ? { queueEntryId } : {}),
   });
-  const finish = () => {
+  const finish = (idle: GenerationTick = { type: 'idle' }) => {
     if (cancelled || sawIdle) return;
     if (!targetFinished()) {
       for (const chapterId of chapterIds?.length ? chapterIds : [undefined]) {
@@ -5760,7 +5760,7 @@ function realStreamGeneration({
     }
     if (!cancelled) {
       sawIdle = true;
-      onTick({ type: 'idle' });
+      onTick(idle);
     }
   };
   /* Track whether the controller has aborted so the inner catch can
@@ -5810,6 +5810,12 @@ function realStreamGeneration({
             let payload = JSON.parse(dataLines.join('\n')) as GenerationTick;
             if (cancelled) return { shouldReconnect: false };
             sawAnyTick = true;
+            /* A stopped attempt can emit idle without completing its target.
+               Record the failure before idle releases and done-prunes its row. */
+            if (payload.type === 'idle' && chapterIds?.length) {
+              finish(payload);
+              continue;
+            }
             if (payload.type === 'idle') sawIdle = true;
             if (payload.type === 'chapter_failed') payload = scopeFailure(payload);
             const matchesQueue =
@@ -5818,7 +5824,9 @@ function realStreamGeneration({
               payload.queueEntryId === queueEntryId;
             if (
               matchesQueue &&
-              (payload.type === 'chapter_complete' || payload.type === 'chapter_failed')
+              (payload.type === 'chapter_complete' ||
+                payload.type === 'chapter_failed' ||
+                payload.type === 'chapter_awaiting_fallback_confirm')
             ) {
               if (payload.chapterId != null && chapterIds?.includes(payload.chapterId))
                 finishedTargets.add(payload.chapterId);

@@ -289,7 +289,7 @@ setup rather than repeatedly loading and evicting models.
 
 | Group | Setup | Rows |
 |---|---|---|
-| **A** | The GPU box (single 8 GB for most; the 2-card boot for a few) | 47 |
+| **A** | The GPU box (single 8 GB for most; the 2-card boot for a few) | 48 |
 | **B** | Local Ollama analyzer only, no TTS sidecar | 4 |
 | **C** | One *Ночной дозор* re-analysis session | 4 |
 | **D** | Multi-language TTS render + ASR | 3 |
@@ -300,7 +300,7 @@ setup rather than repeatedly loading and evicting models.
 | — | **Blocked** (hardware absent) | 2 |
 | — | **Unconfirmed** (not debts until substantiated) | 2 |
 
-**74 owed.** Oldest: **2026-06-01** (plans 160, 161, 165).
+**75 owed.** Oldest: **2026-06-01** (plans 160, 161, 165).
 
 > **Correction, 2026-08-20 (rework of wave-3's own recording, `#2497`).** These
 > totals were rechecked against wave 3's actual dispositions rather than left
@@ -2648,6 +2648,27 @@ must be **rebuilt for the new voice**, not reused against the old speaker's.
 *Criteria:* the two bullets above. *Cost:* short — one render, one
 reassignment, one re-render. Records A24's final sub-check ("no
 `voice-mismatch` rows").
+
+### A48 · Qwen long-input fragmentation — chapters 96/101 · **real GPU + Qwen 1.7B sidecar + the affected live book**
+
+**Still owed (2026-10-31).** The 2,703-character chapter 96 input repeatedly
+reached the 8,182-token decoder ceiling and returned exactly 655.28 seconds of
+audio; chapter 101 also has oversized 1,096- and 833-character blocks. HTTP
+regressions prove lossless bounded requests, settings, order, PCM joins and
+failure behavior, but cannot prove that the real model finishes or speaks all
+the text correctly. Generate both pending chapters with unchanged manuscript,
+cast, voice/model/language and delivery settings. Verify bounded provider
+pieces, complete chapter audio files that decode, original group ordering and
+final groups, no repeated/truncated speech or unacceptable delivery/voice
+discontinuities at joins/endings, and that the requested export block recognizes
+both completed chapters.
+
+*Criteria/results:* [Qwen long-input run sheet](qwen-long-input-onbox-acceptance.md).
+*Plan:* [136 correction](../features/archive/136-qwen-token-budget-batching.md#long-input-correction-2026-10-31).
+*Needs:* the authorized affected live book and real Qwen 1.7B sidecar/GPU.
+*Result:* not run. Issues disabled (HTTP 410); no ticket fabricated. Canonical
+Claude artifact publication is unavailable in this tool surface; the tracked
+styled twin is updated for review.
 
 ## Group B — local Ollama analyzer only
 
