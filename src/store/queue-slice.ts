@@ -45,8 +45,9 @@ export interface QueueState {
       `Pause` is the only opt-out; `Resume` un-pauses, it does not "start" an
       idle queue. Since plan 102 Should #5 this flag is also the open-side gate
       the generation-stream middleware reads (it replaced the removed
-      `chapters.paused`), so a paused queue suppresses cold-boot auto-resume
-      too. Contract documented in docs/features/archive/102-global-queue-modal.md
+      `chapters.paused`), so a paused queue suppresses new cold-boot claims;
+      persisted in_progress entries still get observation-only subscriptions.
+      Contract documented in docs/features/archive/102-global-queue-modal.md
       (invariant 8). */
   paused: boolean;
   /** Sidecar-recycling gate — true when the server's active sidecar supervisor

@@ -37,6 +37,7 @@ import { evictIdleQwenBase } from '../gpu/evict-idle-tts.js';
 import { coquiLanguageCode } from './voice-mapping.js';
 import { manifestSlotFor } from './clone-engines.js';
 import { sidecarLanguageName } from './language.js';
+import { splitQwenInput } from './qwen-input.js';
 
 /* #1951 — decide what (if anything) goes in the request's `language` field for
    ONE synth item, given the caller's BCP-47 language and whether the voice is
@@ -204,6 +205,33 @@ export class SidecarTtsProvider implements TtsProvider {
     cloned,
     signal,
   }: SynthesizeInput): Promise<SynthesizeOutput> {
+    const parts = this.engine === 'qwen' ? splitQwenInput(text) : [text];
+    if (parts.length > 1) {
+      /* Re-enter before acquiring the engine semaphore: holding it across a
+         recursive synth would deadlock. Each part keeps the original route. */
+      const outputs: SynthesizeOutput[] = [];
+      for (const part of parts) {
+        signal?.throwIfAborted();
+        const output = await this.synthesize({
+          text: part,
+          voiceName,
+          modelKey,
+          language,
+          cloned,
+          signal,
+        });
+        if (outputs.length && output.sampleRate !== outputs[0].sampleRate) {
+          throw new Error('Local Qwen fragments returned different sample rates.');
+        }
+        outputs.push(output);
+      }
+      const substituted = outputs.find((output) => output.voiceSubstitutedFrom);
+      return {
+        ...outputs[0],
+        pcm: Buffer.concat(outputs.map((output) => output.pcm)),
+        ...(substituted ? { voiceSubstitutedFrom: substituted.voiceSubstitutedFrom } : {}),
+      };
+    }
     /* fs-59 W4b — XTTS's own language table uses `zh-cn` where every other
        engine/the registry uses `zh` (Task 4b.0). Map ONLY at this
        sidecar-request boundary, and ONLY for the Coqui engine — the caller's
@@ -326,6 +354,39 @@ export class SidecarTtsProvider implements TtsProvider {
     language,
     signal,
   }: SynthesizeBatchInput): Promise<SynthesizeBatchOutput> {
+    const parts = this.engine === 'qwen' ? items.map((item) => splitQwenInput(item.text)) : [];
+    if (parts.some((pieces) => pieces.length > 1)) {
+      /* Keep batch-only live instruct even when fragmenting one item. Return
+         exactly one joined PCM per original item, in the caller's order. */
+      const pcms: Buffer[] = [];
+      let sampleRate: number | undefined;
+      let genMs: number | undefined = 0;
+      let audioMs: number | undefined = 0;
+      for (const [index, pieces] of parts.entries()) {
+        const itemPcms: Buffer[] = [];
+        for (const text of pieces) {
+          signal?.throwIfAborted();
+          const output = await this.synthesizeBatch({
+            items: [{ ...items[index], text }],
+            modelKey,
+            liveInstruct,
+            language,
+            signal,
+          });
+          if (sampleRate != null && output.sampleRate !== sampleRate) {
+            throw new Error('Local Qwen fragments returned different sample rates.');
+          }
+          sampleRate = output.sampleRate;
+          itemPcms.push(output.pcms[0]);
+          /* Missing metrics mean an incomplete total, not a zero-cost part. */
+          genMs = genMs != null && output.genMs != null ? genMs + output.genMs : undefined;
+          audioMs =
+            audioMs != null && output.audioMs != null ? audioMs + output.audioMs : undefined;
+        }
+        pcms.push(Buffer.concat(itemPcms));
+      }
+      return { pcms, sampleRate: sampleRate!, genMs, audioMs };
+    }
     const body = JSON.stringify({
       engine: this.engine,
       model: sidecarModelId(modelKey),

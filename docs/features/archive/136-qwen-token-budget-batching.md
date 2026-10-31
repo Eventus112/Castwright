@@ -149,6 +149,40 @@ finish under ~250 s (cap 32 was safe). Note the A/B also showed wide caps are a
 wash-to-worse on dialogue-dense chapters (padding waste), so width is not the
 dialogue lever regardless — short-line coalescing is.
 
+## Long-input correction (2026-10-31)
+
+A real remaining chapter's 2,680-character normalized input repeatedly produced
+655.28 seconds of audio at Qwen's 8,182-token decoder ceiling. Chapter 101 also
+contains 1,096- and 833-character blocks. Narrowing the batch alone does not
+bound an individual input. GitHub Issues is disabled (HTTP 410); this brief
+records the work without inventing an issue number.
+
+At the Qwen provider boundary, split only inputs exceeding 600 Unicode code
+points. Prefer paragraph, sentence, then whitespace breaks in the latter half,
+with earlier whitespace and code-point breaks as fallbacks. Keep every
+character, punctuation mark and whitespace. Synthesize serially before taking
+any outer engine semaphore, then concatenate PCM into one result per original
+item. Mixed batches use singleton batch calls so live instruct, emotion,
+cloned-language mapping, voice and model retain their existing path. Reject
+sample-rate mismatches, cancellation and any fragment error without returning
+partial audio. Sum complete telemetry; an omitted metric leaves its total
+undefined. Existing short single/batch wire requests remain byte-identical.
+The manuscript, cast, sentence/group metadata and output-token policy do not
+change. Boundaries may introduce audible joins; live listening is still owed.
+Whitespace-only pieces are attached to a spoken neighbor because the sidecar
+rejects blank requests. Such pathological whitespace can exceed the nominal
+600-character bound; the spoken payload remains bounded, and ordinary
+normalized generation inputs retain the full bound. Entirely blank input keeps
+its existing one-request behavior.
+
+Acceptance: lossless Unicode/word-boundary helper tests and real local HTTP
+provider tests cover the 2,703-character Russian multi-paragraph shape, both
+Qwen tiers, mixed-batch ordering/instruct/emotion/language, PCM concatenation,
+metrics, cancellation, errors, rate mismatch and ordinary request bytes. Run
+with `--retry=0`. Live chapter 96/101 completion, audio files and listening are
+tracked as A48 in the [on-box register](../../testing/onbox-acceptance-register.md)
+and its [run sheet](../../testing/qwen-long-input-onbox-acceptance.md).
+
 ## Ship notes
 
 **2026-05-30 — live A/B completed; shipped as the default.** The fixed-width vs token-budget A/B was run on the live 8 GB sidecar with no OOM, and the adopted production config is **cap 32 / budget 3600**. That config is now the **shipped code default** (`server/src/tts/synthesise-chapter.ts`): `QWEN_BATCH_SIZE` default `4 → 32`, `QWEN_BATCH_TOKEN_BUDGET` default `0 → 3600`. The unset-vs-explicit-`0` distinction is preserved by the new exported `resolveQwenTokenBudget` helper (unset/empty → 3600 ON; an explicit `0` → the fixed-width kill-switch), unit-pinned in `synthesise-chapter.test.ts`. `server/.env.example` documents the new defaults. Output remains byte-identical (per-item prompts + index scatter-back). Closes backlog `side-9`.

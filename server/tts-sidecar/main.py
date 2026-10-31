@@ -979,6 +979,16 @@ def _mark_cuda_poisoned(reason: str) -> None:
         _schedule_poison_exit()
 
 
+def _cuda_oom_detail(reason: Optional[str]) -> Optional[str]:
+    """Curate an explicit GPU OOM without exposing the private exception text."""
+    if reason and re.search(
+        r"\b(?:CUDA|HIP)(?: error:)? out of memory\b|out of memory.*\b(?:CUDA|HIP)\b",
+        reason, re.IGNORECASE,
+    ):
+        return "CUDA out of memory."
+    return None
+
+
 def _reset_poison_for_test() -> None:
     """Test-only: clear process poison state so cases don't bleed into each
     other (the flags are module globals that outlive a TestClient)."""
@@ -10503,6 +10513,7 @@ async def synthesize(req: Request) -> Response:
         return JSONResponse(
             {
                 "detail": (
+                    _cuda_oom_detail(_process_poison_reason) or
                     "Voice engine is in a poisoned CUDA state from a prior CUDA "
                     "error and must be restarted. A fresh process is being "
                     "respawned automatically; retry once /health responds again."
@@ -10609,7 +10620,7 @@ async def synthesize(req: Request) -> Response:
     except Exception as e:
         # Internal-only — feeds CUDA-poison detection + the server-side log,
         # never a response body (the body stays generic below).
-        err_str = f"{e}"  # exc-text-safe: err_str is used only for pattern matching (_CUDA_POISON_RE.search) and logging; the response body is hardcoded
+        err_str = f"{e}"  # exc-text-safe: err_str is used only for pattern matching and logging; _cuda_oom_detail returns only a static literal
         # Forensic log: the offending text + speaker + language make a
         # post-mortem possible. Without these, "synth failed" with no
         # context means we keep hitting the same input bug blind. Truncated
@@ -10641,7 +10652,7 @@ async def synthesize(req: Request) -> Response:
             )
             _mark_cuda_poisoned(err_str)
             return JSONResponse(
-                {"detail": "Internal error.", "poisoned": True},
+                {"detail": _cuda_oom_detail(err_str) or "Internal error.", "poisoned": True},
                 status_code=503,
             )
 
@@ -10898,6 +10909,7 @@ async def synthesize_batch(req: Request) -> Response:
         return JSONResponse(
             {
                 "detail": (
+                    _cuda_oom_detail(_process_poison_reason) or
                     "Voice engine is in a poisoned CUDA state from a prior CUDA "
                     "error and must be restarted. A fresh process is being "
                     "respawned automatically; retry once /health responds again."
@@ -10936,7 +10948,7 @@ async def synthesize_batch(req: Request) -> Response:
         )
     except Exception as e:
         # Internal-only — forensic log + CUDA-poison detection, never a body.
-        err_str = f"{e}"  # exc-text-safe: err_str is used only for pattern matching (_CUDA_POISON_RE.search) and logging; the response body is hardcoded
+        err_str = f"{e}"  # exc-text-safe: err_str is used only for pattern matching and logging; _cuda_oom_detail returns only a static literal
         # Forensic beacon: model + item count + the failing message.
         log.exception(
             "batch synth failed (engine=qwen model=%s items=%d): %s",
@@ -10947,7 +10959,10 @@ async def synthesize_batch(req: Request) -> Response:
         # left the Qwen batch path wedging the whole run).
         if _CUDA_POISON_RE.search(err_str):
             _mark_cuda_poisoned(err_str)
-            return JSONResponse({"detail": "Internal error.", "poisoned": True}, status_code=503)
+            return JSONResponse(
+                {"detail": _cuda_oom_detail(err_str) or "Internal error.", "poisoned": True},
+                status_code=503,
+            )
         return JSONResponse({"detail": "Internal error."}, status_code=500)
     finally:
         _inflight_synth -= 1  # srv-17c: clears the recycle drain regardless of outcome

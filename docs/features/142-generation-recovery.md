@@ -41,13 +41,13 @@ A sidecar host-RAM leak (plan 141) OOM-killed the Node server mid-run. Two laten
 
 - `generation.ts` Hook 1: right after the `chapter_complete` broadcast (chapter rendered + persisted), the server marks the queue entry done for a genuine single-chapter queue job (`job.queueEntryId != null && job.chapterId === chapter.id`). No longer depends on the frontend `/complete`.
 - Hook 2: when a non-force, single-chapter queue POST targets a chapter whose audio already exists on disk (so nothing renders and Hook 1 can't fire — the restart-after-crash case), the entry is completed at the route. Without this it loops `in_progress`↔`queued` across boots.
-- Both go through a new module-level `serializeQueueMutation()` promise-chain, and the existing srv-12 orphan-recovery reset was routed through it too — there's no file lock, and the server now mutates `.queue.json` from concurrent contexts, so serializing prevents a lost-removal race for N>1 workers. The frontend `/complete` remains a backstop, so a race only falls back to prior behaviour.
+- Both go through a module-level `serializeQueueMutation()` promise-chain, shared with fallback-confirm parking to prevent lost writes among this module's concurrent mutations for N>1 workers. The frontend `/complete` remains a backstop. Orphan expiry performs no queue read/reset/write, so it cannot overwrite a frontend failure/removal (plan 139).
 - `markQueueEntryDoneOnDisk` is idempotent: it skips when the entry is already gone (frontend won the race), so double-complete is a no-op.
 
 ## Architectural impact
 
 - **New seams:** `onExit` on `SpawnSidecarOpts`; the supervisor module (start/stop/current); `serializeQueueMutation` + `markQueueEntryDoneOnDisk` in `generation.ts`.
-- **Invariants preserved:** `spawnSidecar`'s null-return contract; the stale-sidecar handshake; the frontend-owned queue lifecycle still works (server completion is additive + idempotent); the srv-12 orphan-recovery guards (last-subscriber + registration check) are unchanged beyond routing through the serializer.
+- **Invariants preserved:** `spawnSidecar`'s null-return contract; the stale-sidecar handshake; the frontend-owned queue lifecycle still works (server completion is additive + idempotent). The srv-12 last-subscriber/registration guards run after a cancellable 30-second disconnect grace and synchronously recheck abort state before aborting without a queue write (plan 139). A returning observer persists unavailable attempts as Failed with Retry; no-client rows await reload observation or boot recovery. Subscribe-only resume never enters Hook 2, so pre-existing audio cannot complete an unavailable forced attempt.
 - **Reversibility:** revert the four files; no schema/data migration (queue + state shapes unchanged).
 
 ## Invariants to preserve
@@ -55,7 +55,7 @@ A sidecar host-RAM leak (plan 141) OOM-killed the Node server mid-run. Two laten
 - The supervisor is the ONLY wirer of `onExit`; each (re)spawn registers it afresh.
 - The supervisor is also the only wirer of `onAdoptExisting`; only the fresh-reuse branch fires it, so an adopted (already-listening) sidecar is watched and respawned on disappearance, while a disabled / not-ours / stale-unreplaceable `null` stays dormant.
 - `stop()` MUST set `stopped` before reaping, so a shutdown kill never respawns — this also halts the adopt watchdog.
-- Server-side queue completion MUST be idempotent (skip-if-absent) and serialized, so it can't double-prune or race the frontend `/complete` / orphan-recovery.
+- Server-side queue completion MUST be idempotent (skip-if-absent) and serialized with other generation-module mutations, so concurrent chapter completions preserve each removal. Orphan expiry MUST remain write-free.
 - Hook 1 fires only for single-chapter queue jobs (`chapterId === chapter.id`), never the back-compat `*` walker (chapterId null).
 
 ## Test plan

@@ -195,6 +195,106 @@ const openedChapterIds = () =>
   streamGenerationMock.mock.calls.map((c) => (c[0] as { chapterIds: number[] }).chapterIds);
 
 describe('queue-dispatcher-middleware (queue-sole concurrency)', () => {
+  describe('reload adoption', () => {
+    it('observes a persisted in_progress entry without starting or resetting its chapter', async () => {
+      const store = makeStore();
+      store.dispatch(chaptersSlice.actions.setCurrentBookId('book-A'));
+      store.dispatch(
+        chaptersSlice.actions.setChapters([
+          { id: 3, title: 'Chapter 3', state: 'in_progress', progress: 0.43, characters: {} },
+        ] as never),
+      );
+      seed(store, [entry({ status: 'in_progress', modelKey: 'qwen3-tts-1.7b' })]);
+      await flushMicro();
+
+      expect(streamGenerationMock).toHaveBeenCalledTimes(1);
+      expect(streamGenerationMock.mock.calls[0][0]).toMatchObject({
+        bookId: 'book-A',
+        chapterIds: [3],
+        modelKey: 'qwen3-tts-1.7b',
+        queueEntryId: 'e1',
+        resume: true,
+      });
+      expect(streamGenerationMock.mock.calls[0][0].force).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(store.getState().chapters.chapters[0].progress).toBe(0.43);
+    });
+
+    it('does not duplicate observers across repeated persisted snapshots', async () => {
+      const store = makeStore();
+      const persisted = [entry({ status: 'in_progress' })];
+      seed(store, persisted);
+      seed(store, persisted);
+      await flushMicro();
+      seed(store, persisted);
+      await flushMicro();
+      expect(streamGenerationMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['paused', 'recycling'] as const)('observes live work while %s still blocks new fills', async (gate) => {
+      const store = makeStore(2);
+      queueEntries = [entry({ status: 'in_progress' }), entry({ id: 'next', chapterId: 4 })];
+      store.dispatch(queueSlice.actions.setSnapshot({
+        entries: queueEntries,
+        paused: gate === 'paused',
+        recycling: gate === 'recycling',
+      }));
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3]]);
+      expect(streamGenerationMock.mock.calls[0][0].resume).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('adopts every live entry before fills even when the worker limit was lowered', async () => {
+      const store = makeStore(1);
+      seed(store, [
+        entry({ id: 'next', chapterId: 4 }),
+        entry({ id: 'live-a', chapterId: 3, status: 'in_progress' }),
+        entry({ id: 'live-b', bookId: 'book-B', chapterId: 1, status: 'in_progress' }),
+      ]);
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3], [1]]);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      completeStream('book-A', 3);
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3], [1]]);
+      completeStream('book-B', 1);
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3], [1], [4]]);
+      expect(streamGenerationMock.mock.calls[2][0].force).toBe(true);
+    });
+
+    it('fails a missing live attempt and frees its slot without re-adopting stale in_progress snapshots', async () => {
+      const store = makeStore(1);
+      seed(store, [entry({ status: 'in_progress' }), entry({ id: 'next', chapterId: 4 })]);
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3]]);
+
+      const serve = fetchMock.getMockImplementation() as (
+        url: string,
+        init?: { method?: string; body?: string },
+      ) => Promise<Response>;
+      let finishComplete!: () => void;
+      fetchMock.mockImplementation((url, init) =>
+        String(url).endsWith('/e1/complete')
+          ? new Promise((resolve) => { finishComplete = () => resolve(serve(url, init)); })
+          : serve(url, init),
+      );
+      failStream('book-A', 3, 'Live attempt is unavailable. Click Retry.');
+      await flushMicro();
+      seed(store, queueEntries);
+      await flushMicro();
+      expect(openedChapterIds()).toEqual([[3], [4]]);
+      expect(fetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/e1/complete'))).toHaveLength(1);
+
+      finishComplete();
+      await flushMicro();
+      expect(store.getState().queue.entries.find((e) => e.id === 'e1')?.status).toBe('failed');
+      expect(store.getState().queue.entries.find((e) => e.id === 'e1')?.errorReason).toMatch(/Retry/);
+    });
+  });
+
   it('opens a stream for a same-book entry and flips its rows', async () => {
     const store = makeStore();
     store.dispatch(chaptersSlice.actions.setCurrentBookId('book-A'));
@@ -385,7 +485,7 @@ describe('queue-dispatcher-middleware (queue-sole concurrency)', () => {
     expect(failed?.errorReason).toBe('sidecar 500');
 
     /* Retry — the user flips it back to queued. The dispatcher must re-claim it
-       (a failed entry was NOT added to the no-reclaim `completed` set), opening
+       after the temporary closed-stream guard clears, opening
        a SECOND stream for chapter 3. */
     queueEntries = queueEntries.map((e) =>
       e.id === 'a3' ? { ...e, status: 'queued', errorReason: null } : e,
@@ -592,6 +692,10 @@ describe('queue-dispatcher-middleware (queue-sole concurrency)', () => {
          claim left it (`in_progress`) at this point (#1284). */
       parkStream('book-A', 1, [{ id: 'wren', name: 'Wren' }]);
       await flushMicro();
+
+      seed(store, queueEntries);
+      await flushMicro();
+      expect(openedChapterIds().filter((ids) => ids[0] === 1)).toHaveLength(1);
 
       /* Reconcile must NOT POST /complete for the parked entry — that would
          clobber it — and must leave it re-claimable once the snapshot catches
